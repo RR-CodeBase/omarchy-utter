@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.rr-codebase.utter",
+  "name": "Utter",
+  "version": "0.1.0",
+  "author": "Ruan Roos",
+  "description": "Say it, and the window manager does it. Push-to-talk voice commands for Omarchy, transcribed locally by Voxtype and matched against an editable grammar.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "UtterWidget.qml"
+  },
+  "license": "MIT",
+  "barWidget": {
+    "displayName": "Utter",
+    "description": "Voice commands: hold the key, say what you want, watch it happen. Shows what was heard and what ran.",
+    "category": "Productivity",
+    "aliases": [
+      "voice",
+      "speech",
+      "command",
+      "microphone",
+      "utter"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

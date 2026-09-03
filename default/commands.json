@@ -1,0 +1,211 @@
+{
+  "version": 1,
+  "wakeWords": ["omarchy", "computer", "hey omarchy"],
+  "slots": {
+    "dir": {
+      "l": ["left"],
+      "r": ["right"],
+      "u": ["up", "above", "upward"],
+      "d": ["down", "below", "downward"]
+    },
+    "num": {
+      "1": ["one", "won", "1"],
+      "2": ["two", "to", "too", "2"],
+      "3": ["three", "tree", "3"],
+      "4": ["four", "for", "fore", "4"],
+      "5": ["five", "5"],
+      "6": ["six", "sicks", "6"],
+      "7": ["seven", "7"],
+      "8": ["eight", "ate", "8"],
+      "9": ["nine", "9"],
+      "10": ["ten", "10"]
+    },
+    "app": {
+      "browser": ["browser", "the browser", "chrome", "chromium", "firefox"],
+      "terminal": ["terminal", "the terminal", "a terminal", "console", "shell"],
+      "editor": ["editor", "the editor", "my editor", "code"]
+    }
+  },
+  "commands": [
+    { "id": "focus.move", "group": "Windows",
+      "say": ["focus {dir}", "go {dir}", "move focus {dir}", "focus the {dir} window"],
+      "run": "hyprctl dispatch movefocus {dir}",
+      "label": "Focus {dir}" },
+
+    { "id": "window.move", "group": "Windows",
+      "say": ["move {dir}", "move window {dir}", "move this {dir}", "push {dir}", "throw it {dir}"],
+      "run": "hyprctl dispatch movewindow {dir}",
+      "label": "Move window {dir}" },
+
+    { "id": "window.close", "group": "Windows",
+      "say": ["close window", "close this", "close it", "kill this", "kill window", "close the window"],
+      "run": "hyprctl dispatch killactive",
+      "label": "Close window" },
+
+    { "id": "window.fullscreen", "group": "Windows",
+      "say": ["full screen", "fullscreen", "make it full screen", "maximise", "maximize"],
+      "run": "hyprctl dispatch fullscreen 1",
+      "label": "Fullscreen" },
+
+    { "id": "window.float", "group": "Windows",
+      "say": ["float this", "float it", "toggle floating", "unfloat this", "float window"],
+      "run": "hyprctl dispatch togglefloating",
+      "label": "Toggle floating" },
+
+    { "id": "window.split", "group": "Windows",
+      "say": ["split", "toggle split", "split this", "flip the split"],
+      "run": "hyprctl dispatch togglesplit",
+      "label": "Toggle split" },
+
+    { "id": "window.center", "group": "Windows",
+      "say": ["center this", "centre this", "center window", "centre window"],
+      "run": "hyprctl dispatch centerwindow",
+      "label": "Center window" },
+
+    { "id": "window.pin", "group": "Windows",
+      "say": ["pin this", "pin it", "pin window", "unpin this"],
+      "run": "hyprctl dispatch pin",
+      "label": "Pin window" },
+
+    { "id": "workspace.go", "group": "Workspaces",
+      "say": ["workspace {num}", "go to workspace {num}", "switch to workspace {num}", "desktop {num}"],
+      "run": "hyprctl dispatch workspace {num}",
+      "label": "Workspace {num}" },
+
+    { "id": "workspace.next", "group": "Workspaces",
+      "say": ["next workspace", "workspace next", "next desktop"],
+      "run": "hyprctl dispatch workspace e+1",
+      "label": "Next workspace" },
+
+    { "id": "workspace.prev", "group": "Workspaces",
+      "say": ["previous workspace", "last workspace", "workspace back", "previous desktop"],
+      "run": "hyprctl dispatch workspace e-1",
+      "label": "Previous workspace" },
+
+    { "id": "workspace.throw", "group": "Workspaces",
+      "say": ["move this to {num}", "throw this to {num}", "send this to workspace {num}", "move to workspace {num}", "throw it to {num}"],
+      "run": "hyprctl dispatch movetoworkspace {num}",
+      "label": "Move window to workspace {num}" },
+
+    { "id": "app.launch", "group": "Apps",
+      "say": ["open {app}", "launch {app}", "new {app}", "start {app}"],
+      "run": "omarchy launch {app}",
+      "label": "Open {app}" },
+
+    { "id": "menu.open", "group": "Apps",
+      "say": ["open menu", "show menu", "omarchy menu", "main menu"],
+      "run": "omarchy menu",
+      "label": "Omarchy menu" },
+
+    { "id": "menu.keybindings", "group": "Apps",
+      "say": ["show keybindings", "what are my keybindings", "keybindings", "show shortcuts"],
+      "run": "omarchy menu keybindings",
+      "label": "Keybindings" },
+
+    { "id": "clipboard.open", "group": "Apps",
+      "say": ["show clipboard", "clipboard history", "open clipboard", "paste history"],
+      "run": "omarchy menu clipboard",
+      "label": "Clipboard history" },
+
+    { "id": "volume.up", "group": "Sound",
+      "say": ["volume up", "louder", "turn it up", "turn the volume up"],
+      "run": "omarchy audio output volume raise",
+      "label": "Volume up" },
+
+    { "id": "volume.down", "group": "Sound",
+      "say": ["volume down", "quieter", "turn it down", "turn the volume down"],
+      "run": "omarchy audio output volume lower",
+      "label": "Volume down" },
+
+    { "id": "volume.mute", "group": "Sound",
+      "say": ["mute", "unmute", "mute the sound", "silence", "mute audio"],
+      "run": "omarchy audio output volume mute-toggle",
+      "label": "Mute audio" },
+
+    { "id": "mic.mute", "group": "Sound",
+      "say": ["mute the microphone", "mute mic", "unmute the microphone", "unmute mic", "mute my mic"],
+      "run": "omarchy audio input mute",
+      "label": "Mute microphone" },
+
+    { "id": "brightness.up", "group": "Display",
+      "say": ["brighter", "brightness up", "turn up the brightness"],
+      "run": "omarchy brightness display +10%",
+      "label": "Brightness up" },
+
+    { "id": "brightness.down", "group": "Display",
+      "say": ["dimmer", "darker", "brightness down", "turn down the brightness"],
+      "run": "omarchy brightness display 10%-",
+      "label": "Brightness down" },
+
+    { "id": "nightlight.toggle", "group": "Display",
+      "say": ["night light", "toggle night light", "warm the screen", "blue light filter"],
+      "run": "omarchy toggle nightlight",
+      "label": "Night light" },
+
+    { "id": "theme.next", "group": "Display",
+      "say": ["next theme", "change the theme", "switch theme", "new theme"],
+      "run": "omarchy theme next",
+      "label": "Next theme" },
+
+    { "id": "wallpaper.next", "group": "Display",
+      "say": ["next wallpaper", "change the wallpaper", "new background", "next background"],
+      "run": "omarchy theme bg next",
+      "label": "Next wallpaper" },
+
+    { "id": "dnd.toggle", "group": "Focus",
+      "say": ["do not disturb", "silence notifications", "quiet mode", "stop notifications"],
+      "run": "omarchy toggle notification silencing",
+      "label": "Do not disturb" },
+
+    { "id": "idle.toggle", "group": "Focus",
+      "say": ["stay awake", "keep awake", "caffeine", "allow idle", "stop staying awake"],
+      "run": "omarchy toggle idle",
+      "label": "Stay awake" },
+
+    { "id": "bar.toggle", "group": "Focus",
+      "say": ["hide the bar", "show the bar", "toggle the bar"],
+      "run": "omarchy toggle bar",
+      "label": "Toggle bar" },
+
+    { "id": "capture.region", "group": "Capture",
+      "say": ["screenshot", "take a screenshot", "capture region", "grab a screenshot"],
+      "run": "omarchy capture screenshot region",
+      "label": "Screenshot a region" },
+
+    { "id": "capture.screen", "group": "Capture",
+      "say": ["screenshot the screen", "capture the whole screen", "full screenshot", "screenshot everything"],
+      "run": "omarchy capture screenshot fullscreen",
+      "label": "Screenshot the screen" },
+
+    { "id": "capture.text", "group": "Capture",
+      "say": ["copy text from screen", "grab text", "read the screen", "extract text"],
+      "run": "omarchy capture text",
+      "label": "Extract text (OCR)" },
+
+    { "id": "session.lock", "group": "Session", "confirm": false,
+      "say": ["lock the screen", "lock screen", "lock it", "lock my computer"],
+      "run": "omarchy system lock",
+      "label": "Lock screen" },
+
+    { "id": "session.sleep", "group": "Session", "confirm": true,
+      "say": ["go to sleep", "suspend", "sleep the computer"],
+      "run": "omarchy system sleep lock",
+      "label": "Sleep" },
+
+    { "id": "session.reboot", "group": "Session", "confirm": true,
+      "say": ["reboot", "restart the computer", "reboot the computer"],
+      "run": "omarchy system reboot",
+      "label": "Reboot" },
+
+    { "id": "session.shutdown", "group": "Session", "confirm": true,
+      "say": ["shut down", "shutdown", "power off", "turn off the computer"],
+      "run": "omarchy system shutdown",
+      "label": "Shut down" },
+
+    { "id": "utter.commands", "group": "Utter",
+      "say": ["what can i say", "list commands", "show commands", "help"],
+      "run": "omarchy menu utter",
+      "internal": "commands",
+      "label": "What can I say?" }
+  ]
+}

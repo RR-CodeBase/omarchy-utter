@@ -1,0 +1,865 @@
+#!/usr/bin/env python3
+"""utter - say it, and Omarchy does it.
+
+Push-to-talk voice commands for Omarchy. Audio is recorded with pw-record,
+transcribed locally by Voxtype (whisper.cpp), then matched against an editable
+grammar. Nothing leaves the machine and nothing is ever typed into the focused
+window: an utterance either matches a command in the grammar and runs it, or it
+is discarded.
+
+The grammar lives in ~/.config/omarchy/utter/commands.json and is yours to edit.
+"""
+
+from __future__ import annotations
+
+import argparse
+import difflib
+import itertools
+import json
+import os
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HOME = Path.home()
+PLUGIN_DIR = Path(__file__).resolve().parent.parent
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "omarchy" / "utter"
+STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "omarchy"
+RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "utter"
+
+COMMANDS_FILE = CONFIG_DIR / "commands.json"
+SETTINGS_FILE = CONFIG_DIR / "settings.json"
+DEFAULT_COMMANDS = PLUGIN_DIR / "default" / "commands.json"
+STATE_FILE = STATE_DIR / "utter.json"
+HISTORY_FILE = STATE_DIR / "utter-history.jsonl"
+
+PID_FILE = RUNTIME_DIR / "record.pid"
+WAV_FILE = RUNTIME_DIR / "record.wav"
+PENDING_FILE = RUNTIME_DIR / "pending.json"
+
+HISTORY_LIMIT = 200
+CONFIRM_WINDOW = 8.0
+
+DEFAULT_SETTINGS = {
+    "enabled": True,
+    "threshold": 0.80,
+    "maxSeconds": 8,
+    "osd": True,
+    "notify": False,
+    "stripWakeWords": True,
+    "voxtype": "",
+    "model": "",
+}
+
+# Words whisper sprinkles in that never carry meaning for a command.
+FILLERS = {"please", "uh", "um", "er", "ah", "okay", "ok", "just", "now", "hey"}
+LEADERS = [
+    "can you", "could you", "would you", "will you", "i want to", "i want you to",
+    "let's", "lets", "please", "go ahead and",
+]
+
+
+# ---------------------------------------------------------------- utilities
+
+def log(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
+def atomic_write(path: Path, text: str) -> None:
+    """Never let a reader (the bar widget) see a half-written file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
+def load_json(path: Path, fallback):
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return fallback
+
+
+def normalize(text: str) -> str:
+    text = (text or "").lower()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def strip_leaders(text: str) -> str:
+    changed = True
+    while changed:
+        changed = False
+        for lead in LEADERS:
+            if text.startswith(lead + " "):
+                text = text[len(lead) + 1:]
+                changed = True
+    return text
+
+
+def drop_fillers(text: str) -> str:
+    kept = [w for w in text.split() if w not in FILLERS]
+    return " ".join(kept) if kept else text
+
+
+# ---------------------------------------------------------------- settings
+
+def settings() -> dict:
+    s = dict(DEFAULT_SETTINGS)
+    s.update(load_json(SETTINGS_FILE, {}) or {})
+    return s
+
+
+def save_settings(s: dict) -> None:
+    atomic_write(SETTINGS_FILE, json.dumps(s, indent=2) + "\n")
+
+
+def ensure_config() -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if not COMMANDS_FILE.exists() and DEFAULT_COMMANDS.exists():
+        shutil.copy(DEFAULT_COMMANDS, COMMANDS_FILE)
+    if not SETTINGS_FILE.exists():
+        save_settings(dict(DEFAULT_SETTINGS))
+
+
+def grammar() -> dict:
+    ensure_config()
+    g = load_json(COMMANDS_FILE, None)
+    if not g:
+        g = load_json(DEFAULT_COMMANDS, {"slots": {}, "commands": []})
+    return g
+
+
+# ---------------------------------------------------------------- matching
+
+class Match:
+    def __init__(self, cmd, slots, score, phrase, labels=None):
+        self.cmd = cmd
+        self.slots = slots            # canonical values, for the run line
+        self.labels = labels or {}    # human-readable values, for the label
+        self.score = score
+        self.phrase = phrase
+
+    @property
+    def rendered(self) -> str:
+        return render(self.cmd.get("run", ""), self.slots)
+
+    @property
+    def label(self) -> str:
+        display = dict(self.slots)
+        display.update(self.labels)
+        return render(self.cmd.get("label", self.cmd.get("id", "")), display)
+
+
+def render(template: str, slots: dict) -> str:
+    out = template
+    for key, value in slots.items():
+        out = out.replace("{" + key + "}", str(value))
+    return out
+
+
+class Matcher:
+    """Two passes: an exact regex over the grammar, then a fuzzy fallback.
+
+    The exact pass is what handles the overwhelming majority of clean
+    transcriptions and costs microseconds. The fuzzy pass exists because
+    whisper mishears short words, and rejecting "focus lefd" would make the
+    whole thing feel broken.
+    """
+
+    SLOT_RE = re.compile(r"\{([a-z_][a-z0-9_]*)\}")
+
+    def __init__(self, g: dict):
+        self.g = g
+        self.slots = g.get("slots", {}) or {}
+        self.wake = sorted(
+            (normalize(w) for w in g.get("wakeWords", []) or []),
+            key=len, reverse=True,
+        )
+        self.entries = []      # (cmd, template, compiled regex, [slot names])
+        self.spoken_to_canon = {}  # slot -> {spoken form: canonical}
+        self.canon_to_label = {}   # slot -> {canonical: first spoken form}
+        self._expansions = None
+        self._build()
+
+    def _forms(self, slot: str):
+        table = self.slots.get(slot, {}) or {}
+        forms = []
+        mapping = {}
+        labels = {}
+        for canon, spoken in table.items():
+            for s in ([spoken] if isinstance(spoken, str) else spoken):
+                n = normalize(s)
+                if not n:
+                    continue
+                forms.append(n)
+                mapping.setdefault(n, str(canon))
+                # A numeric slot reads better as its digit ("Workspace 7")
+                # than as the word that happened to be listed first.
+                labels.setdefault(str(canon), str(canon) if str(canon).isdigit() else n)
+        # Longest first so "workspace ten" beats a bare "ten" inside alternation.
+        forms.sort(key=len, reverse=True)
+        self.spoken_to_canon[slot] = mapping
+        self.canon_to_label[slot] = labels
+        return forms
+
+    def _build(self) -> None:
+        for cmd in self.g.get("commands", []) or []:
+            for template in cmd.get("say", []) or []:
+                norm = normalize(template)
+                # normalize() eats the braces, so pull slots from the raw text
+                # and rebuild the pattern from the raw template instead.
+                names = self.SLOT_RE.findall(template)
+                pattern_src = normalize(self.SLOT_RE.sub(" \x00 ", template))
+                parts = [re.escape(p.strip()) for p in pattern_src.split("\x00")]
+                if not names:
+                    regex = re.compile(r"^" + re.escape(norm) + r"$")
+                    self.entries.append((cmd, template, regex, []))
+                    continue
+                if any(n not in self.slots for n in names):
+                    continue  # a template referencing an unknown slot is dead
+                chunks = []
+                for i, part in enumerate(parts):
+                    if part:
+                        chunks.append(part)
+                    if i < len(names):
+                        alts = "|".join(re.escape(f) for f in self._forms(names[i]))
+                        chunks.append(f"(?P<s{i}>{alts})")
+                regex = re.compile(r"^\s*" + r"\s*".join(c for c in chunks if c) + r"\s*$")
+                self.entries.append((cmd, template, regex, names))
+
+    def strip_wake(self, text: str) -> str:
+        for w in self.wake:
+            if text == w:
+                return ""
+            if text.startswith(w + " "):
+                return text[len(w) + 1:]
+        return text
+
+    def prepare(self, raw: str, strip_wake: bool = True) -> str:
+        text = normalize(raw)
+        if strip_wake:
+            text = self.strip_wake(text)
+        text = strip_leaders(text)
+        return text.strip()
+
+    def _exact(self, text: str):
+        best = None
+        for cmd, template, regex, names in self.entries:
+            m = regex.match(text)
+            if not m:
+                continue
+            slots = {}
+            labels = {}
+            ok = True
+            for i, name in enumerate(names):
+                spoken = m.group(f"s{i}")
+                canon = self.spoken_to_canon.get(name, {}).get(spoken)
+                if canon is None:
+                    ok = False
+                    break
+                slots[name] = canon
+                labels[name] = self.canon_to_label.get(name, {}).get(canon, spoken)
+            if not ok:
+                continue
+            # Prefer the most specific template: the one with the most literal text.
+            literal = len(normalize(self.SLOT_RE.sub(" ", template)))
+            if best is None or literal > best[0]:
+                best = (literal, Match(cmd, slots, 1.0, template, labels))
+        return best[1] if best else None
+
+    def _expand(self):
+        """Every template flattened into concrete phrases, for fuzzy scoring."""
+        if self._expansions is not None:
+            return self._expansions
+        out = []
+        for cmd, template, _regex, names in self.entries:
+            if not names:
+                out.append((normalize(template), cmd, {}, {}))
+                continue
+            choices = []
+            for name in names:
+                table = self.slots.get(name, {}) or {}
+                pairs = []
+                for canon, spoken in table.items():
+                    forms = [spoken] if isinstance(spoken, str) else spoken
+                    for s in forms:
+                        pairs.append((normalize(s), str(canon)))
+                choices.append(pairs)
+            total = 1
+            for c in choices:
+                total *= max(1, len(c))
+            if total > 400:      # runaway slot: exact matching still covers it
+                continue
+            for combo in itertools.product(*choices):
+                phrase = template
+                slots = {}
+                labels = {}
+                for name, (spoken, canon) in zip(names, combo):
+                    phrase = phrase.replace("{" + name + "}", spoken, 1)
+                    slots[name] = canon
+                    labels[name] = self.canon_to_label.get(name, {}).get(canon, spoken)
+                out.append((normalize(phrase), cmd, slots, labels))
+        self._expansions = out
+        return out
+
+    def _fuzzy(self, text: str, threshold: float):
+        best = None
+        matcher = difflib.SequenceMatcher()
+        matcher.set_seq2(text)
+        for phrase, cmd, slots, labels in self._expand():
+            if not phrase:
+                continue
+            # Cheap length gate before the expensive ratio.
+            if abs(len(phrase) - len(text)) > max(6, len(text) * 0.5):
+                continue
+            matcher.set_seq1(phrase)
+            if matcher.real_quick_ratio() < threshold or matcher.quick_ratio() < threshold:
+                continue
+            score = matcher.ratio()
+            if score >= threshold and (best is None or score > best.score):
+                best = Match(cmd, slots, score, phrase, labels)
+        return best
+
+    def match(self, raw: str, threshold: float = 0.80, strip_wake: bool = True):
+        text = self.prepare(raw, strip_wake)
+        if not text:
+            return None, ""
+        hit = self._exact(text)
+        if hit:
+            return hit, text
+        lean = drop_fillers(text)
+        if lean != text:
+            hit = self._exact(lean)
+            if hit:
+                return hit, text
+        hit = self._fuzzy(text, threshold)
+        if hit is None and lean != text:
+            hit = self._fuzzy(lean, threshold)
+        return hit, text
+
+
+# ---------------------------------------------------------------- feedback
+
+def set_state(**kw) -> None:
+    state = load_json(STATE_FILE, {}) or {}
+    state.update(kw)
+    state["at"] = time.time()
+    s = settings()
+    state["enabled"] = bool(s.get("enabled", True))
+    atomic_write(STATE_FILE, json.dumps(state, indent=2) + "\n")
+
+
+def add_history(entry: dict) -> None:
+    try:
+        HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        lines = []
+        if HISTORY_FILE.exists():
+            lines = HISTORY_FILE.read_text().splitlines()
+        lines.append(json.dumps(entry))
+        HISTORY_FILE.write_text("\n".join(lines[-HISTORY_LIMIT:]) + "\n")
+    except Exception:
+        pass
+
+
+def osd(message: str, icon: str = "") -> None:
+    if not settings().get("osd", True):
+        return
+    args = ["omarchy", "osd", "-m", message]
+    if icon:
+        args += ["-i", icon]
+    try:
+        subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+    except Exception:
+        pass
+
+
+def notify(headline: str, body: str = "") -> None:
+    if not settings().get("notify", False):
+        return
+    try:
+        subprocess.run(
+            ["omarchy-notification-send", "-g", "\U000f036c", headline, body],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3,
+        )
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------- voxtype
+
+VOXTYPE_FALLBACKS = [
+    "/usr/lib/voxtype/voxtype-vulkan",
+    "/usr/lib/voxtype/voxtype-avx512",
+    "/usr/lib/voxtype/voxtype-avx2",
+]
+
+
+def find_voxtype() -> str | None:
+    explicit = os.environ.get("UTTER_VOXTYPE") or settings().get("voxtype") or ""
+    if explicit and Path(explicit).is_file() and os.access(explicit, os.X_OK):
+        return explicit
+    found = shutil.which("voxtype")
+    if found:
+        return found
+    for candidate in VOXTYPE_FALLBACKS:
+        if Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def transcribe(wav: Path) -> str:
+    """Voxtype prints logs on stderr and the transcript on stdout."""
+    binary = find_voxtype()
+    if not binary:
+        raise RuntimeError("Voxtype not found - run: omarchy voxtype install")
+    args = [binary, "transcribe", str(wav)]
+    model = settings().get("model") or ""
+    if model:
+        args = [binary, "--model", model, "transcribe", str(wav)]
+    proc = subprocess.run(args, capture_output=True, text=True, timeout=120)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or "").strip().splitlines()[-1:] or "voxtype failed")
+    lines = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
+    return lines[-1] if lines else ""
+
+
+# ---------------------------------------------------------------- recording
+
+def recording_pid() -> int | None:
+    try:
+        pid = int(PID_FILE.read_text().strip())
+    except Exception:
+        return None
+    try:
+        os.kill(pid, 0)
+        return pid
+    except OSError:
+        try:
+            PID_FILE.unlink()
+        except OSError:
+            pass
+        return None
+
+
+def record_start(max_seconds: int) -> bool:
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    if recording_pid():
+        return False
+    if not shutil.which("pw-record"):
+        raise RuntimeError("pw-record not found - install pipewire-audio")
+    try:
+        WAV_FILE.unlink()
+    except OSError:
+        pass
+    args = [
+        "pw-record", "--rate", "16000", "--channels", "1",
+        "--format", "s16", str(WAV_FILE),
+    ]
+    if shutil.which("timeout"):
+        args = ["timeout", "-s", "INT", str(max_seconds)] + args
+    proc = subprocess.Popen(
+        args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    PID_FILE.write_text(str(proc.pid))
+    return True
+
+
+def record_stop(timeout: float = 3.0) -> Path | None:
+    pid = recording_pid()
+    if pid is None:
+        return WAV_FILE if WAV_FILE.exists() else None
+    try:
+        # SIGINT, not SIGKILL: pw-record needs to finalise the WAV header.
+        os.kill(pid, signal.SIGINT)
+    except OSError:
+        pass
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            break
+        time.sleep(0.05)
+    try:
+        PID_FILE.unlink()
+    except OSError:
+        pass
+    return WAV_FILE if WAV_FILE.exists() else None
+
+
+# ---------------------------------------------------------------- execution
+
+def pending_confirm(cmd_id: str) -> bool:
+    data = load_json(PENDING_FILE, {}) or {}
+    return (
+        data.get("id") == cmd_id
+        and (time.time() - float(data.get("at", 0))) <= CONFIRM_WINDOW
+    )
+
+
+def arm_confirm(cmd_id: str) -> None:
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    atomic_write(PENDING_FILE, json.dumps({"id": cmd_id, "at": time.time()}))
+
+
+def clear_confirm() -> None:
+    try:
+        PENDING_FILE.unlink()
+    except OSError:
+        pass
+
+
+def execute(match: Match, dry: bool = False) -> tuple[bool, str]:
+    cmd = match.cmd
+    rendered = match.rendered
+    if not rendered:
+        return False, "command has no run line"
+    if dry:
+        return True, rendered
+    if cmd.get("confirm") and not pending_confirm(cmd.get("id", "")):
+        arm_confirm(cmd.get("id", ""))
+        return False, "confirm"
+    clear_confirm()
+    try:
+        if cmd.get("shell"):
+            subprocess.Popen(
+                rendered, shell=True, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True,
+            )
+        else:
+            subprocess.Popen(
+                shlex.split(rendered), stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True,
+            )
+    except Exception as exc:
+        return False, str(exc)
+    return True, rendered
+
+
+def interpret(raw: str, dry: bool = False, quiet: bool = False) -> int:
+    s = settings()
+    m = Matcher(grammar())
+    hit, cleaned = m.match(raw, float(s.get("threshold", 0.80)), s.get("stripWakeWords", True))
+
+    if hit is None:
+        set_state(state="unheard", heard=raw, action="", score=0)
+        add_history({"at": time.time(), "heard": raw, "matched": None})
+        if not quiet:
+            osd("Didn't catch that", "microphone")
+        print(json.dumps({"heard": raw, "cleaned": cleaned, "matched": None}))
+        return 1
+
+    ok, detail = execute(hit, dry=dry)
+    payload = {
+        "heard": raw,
+        "cleaned": cleaned,
+        "matched": hit.cmd.get("id"),
+        "label": hit.label,
+        "run": hit.rendered,
+        "score": round(hit.score, 3),
+        "confirm": detail == "confirm",
+        "ok": ok,
+    }
+    print(json.dumps(payload))
+
+    if detail == "confirm":
+        set_state(state="confirm", heard=raw, action=hit.label, score=hit.score)
+        if not quiet:
+            osd(f"Say it again to confirm: {hit.label}", "microphone")
+        return 2
+
+    if ok:
+        set_state(state="ok", heard=raw, action=hit.label, score=hit.score)
+        add_history({"at": time.time(), "heard": raw, "matched": hit.cmd.get("id"),
+                     "label": hit.label, "score": round(hit.score, 3)})
+        if not quiet and not dry:
+            osd(hit.label, "microphone")
+        return 0
+
+    set_state(state="error", heard=raw, action=hit.label, error=detail)
+    if not quiet:
+        osd(f"Failed: {detail}", "microphone")
+    return 3
+
+
+# ---------------------------------------------------------------- commands
+
+def cmd_ptt_start(args) -> int:
+    s = settings()
+    if not s.get("enabled", True):
+        osd("Utter is off", "microphone")
+        return 1
+    try:
+        started = record_start(int(s.get("maxSeconds", 8)))
+    except RuntimeError as exc:
+        set_state(state="error", error=str(exc))
+        osd(str(exc), "microphone")
+        return 3
+    if started:
+        set_state(state="listening", heard="", action="")
+    return 0
+
+
+def cmd_ptt_stop(args) -> int:
+    s = settings()
+    if not s.get("enabled", True):
+        return 1
+    wav = record_stop()
+    if wav is None or not wav.exists() or wav.stat().st_size < 4096:
+        set_state(state="idle", heard="", action="")
+        return 1
+    set_state(state="thinking")
+    try:
+        text = transcribe(wav)
+    except Exception as exc:
+        set_state(state="error", error=str(exc))
+        osd(str(exc), "microphone")
+        return 3
+    if not text.strip():
+        set_state(state="unheard", heard="", action="")
+        osd("Didn't catch that", "microphone")
+        return 1
+    return interpret(text)
+
+
+def cmd_listen(args) -> int:
+    if recording_pid():
+        return cmd_ptt_stop(args)
+    return cmd_ptt_start(args)
+
+
+def cmd_say(args) -> int:
+    return interpret(" ".join(args.words), dry=args.dry_run, quiet=args.quiet)
+
+
+def cmd_match(args) -> int:
+    s = settings()
+    m = Matcher(grammar())
+    hit, cleaned = m.match(" ".join(args.words), float(args.threshold or s.get("threshold", 0.80)),
+                           s.get("stripWakeWords", True))
+    if hit is None:
+        print(json.dumps({"cleaned": cleaned, "matched": None}))
+        return 1
+    print(json.dumps({
+        "cleaned": cleaned, "matched": hit.cmd.get("id"), "label": hit.label,
+        "run": hit.rendered, "score": round(hit.score, 3),
+        "confirm": bool(hit.cmd.get("confirm")),
+    }))
+    return 0
+
+
+def cmd_commands(args) -> int:
+    g = grammar()
+    if args.json:
+        print(json.dumps(g.get("commands", []), indent=2))
+        return 0
+    groups: dict[str, list] = {}
+    for c in g.get("commands", []):
+        groups.setdefault(c.get("group", "Other"), []).append(c)
+    for group in sorted(groups):
+        print(f"\n{group}")
+        for c in groups[group]:
+            phrases = ", ".join(f'"{p}"' for p in c.get("say", [])[:3])
+            mark = " (say twice)" if c.get("confirm") else ""
+            print(f"  {c.get('label', c['id']):<32} {phrases}{mark}")
+    print()
+    return 0
+
+
+def cmd_status(args) -> int:
+    state = load_json(STATE_FILE, {}) or {}
+    s = settings()
+    state.setdefault("state", "idle")
+    state["enabled"] = bool(s.get("enabled", True))
+    state["recording"] = recording_pid() is not None
+    if args.json:
+        print(json.dumps(state, indent=2))
+    else:
+        print(f"{'on' if state['enabled'] else 'off'} - {state['state']}"
+              + (f" - heard: {state.get('heard','')}" if state.get("heard") else ""))
+    return 0
+
+
+def cmd_history(args) -> int:
+    if not HISTORY_FILE.exists():
+        return 0
+    lines = HISTORY_FILE.read_text().splitlines()[-args.limit:]
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except Exception:
+            continue
+        when = time.strftime("%H:%M:%S", time.localtime(e.get("at", 0)))
+        label = e.get("label") or "(no match)"
+        print(f"{when}  {e.get('heard','')!r:<44} -> {label}")
+    return 0
+
+
+def cmd_toggle(args) -> int:
+    s = settings()
+    if args.mode == "toggle":
+        s["enabled"] = not s.get("enabled", True)
+    else:
+        s["enabled"] = args.mode == "enable"
+    save_settings(s)
+    set_state(state="idle")
+    osd("Voice commands on" if s["enabled"] else "Voice commands off", "microphone")
+    print("enabled" if s["enabled"] else "disabled")
+    return 0
+
+
+def cmd_doctor(args) -> int:
+    ok = True
+
+    def check(label, good, detail=""):
+        nonlocal ok
+        mark = "OK  " if good else "FAIL"
+        if not good:
+            ok = False
+        print(f"[{mark}] {label}{(' - ' + detail) if detail else ''}")
+
+    binary = find_voxtype()
+    check("Voxtype binary", bool(binary), binary or "run: omarchy voxtype install")
+    models = list((HOME / ".local/share/voxtype/models").glob("*.bin"))
+    check("Whisper model", bool(models),
+          ", ".join(m.name for m in models) or "run: voxtype setup --download")
+    check("pw-record", bool(shutil.which("pw-record")), shutil.which("pw-record") or "install pipewire-audio")
+
+    sources = ""
+    try:
+        sources = subprocess.run(["pactl", "list", "sources", "short"],
+                                 capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        pass
+    check("Microphone source", bool(sources.strip()),
+          f"{len(sources.strip().splitlines())} source(s)" if sources.strip() else "no PulseAudio/PipeWire sources")
+
+    g = grammar()
+    cmds = g.get("commands", [])
+    ids = [c.get("id") for c in cmds]
+    check("Grammar loads", bool(cmds), f"{len(cmds)} commands, {sum(len(c.get('say', [])) for c in cmds)} phrases")
+    dupes = {i for i in ids if ids.count(i) > 1}
+    check("Unique command ids", not dupes, ", ".join(sorted(dupes)) if dupes else "")
+
+    slots = set((g.get("slots") or {}).keys())
+    missing = set()
+    for c in cmds:
+        for t in c.get("say", []):
+            for name in Matcher.SLOT_RE.findall(t):
+                if name not in slots:
+                    missing.add(f"{c.get('id')}:{name}")
+    check("Slots resolve", not missing, ", ".join(sorted(missing)) if missing else "")
+
+    unresolved = []
+    for c in cmds:
+        run = c.get("run", "")
+        if not run or c.get("shell"):
+            continue
+        head = shlex.split(render(run, {k: "1" for k in slots}))[:1]
+        if head and not shutil.which(head[0]):
+            unresolved.append(f"{c.get('id')} -> {head[0]}")
+    check("Commands on PATH", not unresolved, ", ".join(unresolved) if unresolved else "")
+
+    hypr = HOME / ".config/hypr"
+    bound = False
+    if hypr.exists():
+        for f in hypr.rglob("*"):
+            if f.is_file():
+                try:
+                    if "utter" in f.read_text():
+                        bound = True
+                        break
+                except Exception:
+                    continue
+    check("Hyprland keybinding", bound, "" if bound else "run: ./install.sh, or add hypr/utter.conf yourself")
+
+    print()
+    print("Ready." if ok else "Some checks failed - see above.")
+    return 0 if ok else 1
+
+
+def cmd_selftest(args) -> int:
+    """Record, transcribe and match in one shot, without a keybinding."""
+    seconds = args.seconds
+    print(f"Recording {seconds}s - say a command now...", file=sys.stderr)
+    s = settings()
+    record_start(max(seconds + 2, int(s.get("maxSeconds", 8))))
+    time.sleep(seconds)
+    wav = record_stop()
+    if not wav or not wav.exists():
+        print("no audio captured", file=sys.stderr)
+        return 1
+    print(f"captured {wav.stat().st_size} bytes", file=sys.stderr)
+    text = transcribe(wav)
+    print(f"heard: {text!r}", file=sys.stderr)
+    return interpret(text, dry=args.dry_run)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="utter", description="Voice commands for Omarchy")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    ptt = sub.add_parser("ptt", help="push-to-talk (for Hyprland bind/bindr)")
+    ptt_sub = ptt.add_subparsers(dest="phase", required=True)
+    ptt_sub.add_parser("start").set_defaults(func=cmd_ptt_start)
+    ptt_sub.add_parser("stop").set_defaults(func=cmd_ptt_stop)
+
+    sub.add_parser("listen", help="toggle recording (start, then stop and run)").set_defaults(func=cmd_listen)
+
+    say = sub.add_parser("say", help="interpret typed text as if it were spoken")
+    say.add_argument("words", nargs="+")
+    say.add_argument("--dry-run", action="store_true", help="show what would run")
+    say.add_argument("--quiet", action="store_true", help="no OSD")
+    say.set_defaults(func=cmd_say)
+
+    mt = sub.add_parser("match", help="match text without running anything")
+    mt.add_argument("words", nargs="+")
+    mt.add_argument("--threshold", type=float, default=None)
+    mt.set_defaults(func=cmd_match)
+
+    cm = sub.add_parser("commands", help="list the grammar")
+    cm.add_argument("--json", action="store_true")
+    cm.set_defaults(func=cmd_commands)
+
+    st = sub.add_parser("status", help="current state")
+    st.add_argument("--json", action="store_true")
+    st.set_defaults(func=cmd_status)
+
+    hi = sub.add_parser("history", help="recent utterances")
+    hi.add_argument("--limit", type=int, default=20)
+    hi.set_defaults(func=cmd_history)
+
+    for mode in ("enable", "disable", "toggle"):
+        sp = sub.add_parser(mode, help=f"{mode} voice commands")
+        sp.set_defaults(func=cmd_toggle, mode=mode)
+
+    sub.add_parser("doctor", help="check the install").set_defaults(func=cmd_doctor)
+
+    stt = sub.add_parser("selftest", help="record for N seconds, then transcribe and match")
+    stt.add_argument("--seconds", type=int, default=3)
+    stt.add_argument("--dry-run", action="store_true")
+    stt.set_defaults(func=cmd_selftest)
+
+    return p
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        return args.func(args)
+    except KeyboardInterrupt:
+        return 130
+    except Exception as exc:
+        log(f"utter: {exc}")
+        return 3
+
+
+if __name__ == "__main__":
+    sys.exit(main())

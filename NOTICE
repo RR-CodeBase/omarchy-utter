@@ -1,0 +1,10 @@
+Utter
+Copyright (c) 2026 Ruan Roos
+
+This plugin does not bundle a speech recognition engine. Transcription is
+performed on your machine by Voxtype (https://voxtype.io, MIT), which Omarchy
+installs with `omarchy voxtype install`, using whisper.cpp models published by
+the whisper.cpp project (https://github.com/ggerganov/whisper.cpp, MIT).
+
+The bar widget follows the structure of Omarchy's own shell plugins
+(https://github.com/basecamp/omarchy, MIT).
