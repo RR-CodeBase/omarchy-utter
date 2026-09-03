@@ -34,7 +34,7 @@ die()  { printf '  \033[31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 
 remove_bindings() {
   [[ -f $BINDINGS ]] || return 0
-  grep -qF "$BEGIN_MARK" "$BINDINGS" || return 0
+  grep -qF -e "$BEGIN_MARK" "$BINDINGS" || return 0
   # Cut the managed block, leaving anything the user wrote around it alone.
   awk -v b="$BEGIN_MARK" -v e="$END_MARK" '
     index($0, b) { skip = 1 }
@@ -122,6 +122,11 @@ fi
 
 # ---- keybindings -----------------------------------------------------------
 
+# The installed clone is the canonical CLI; fall back to this checkout only if
+# the plugin somehow is not registered.
+CLI="$PLUGINS_DIR/$PLUGIN_ID/bin/utter"
+[[ -x $CLI ]] || CLI="$SCRIPT_DIR/bin/utter"
+
 if ((WITH_BINDINGS)); then
   mkdir -p "$(dirname "$BINDINGS")"
   touch "$BINDINGS"
@@ -129,7 +134,7 @@ if ((WITH_BINDINGS)); then
   {
     echo ""
     echo "$BEGIN_MARK"
-    sed "s|CLI_PATH|$SCRIPT_DIR/bin/utter|g" "$SCRIPT_DIR/hypr/utter.lua"
+    sed "s|CLI_PATH|$CLI|g" "$SCRIPT_DIR/hypr/utter.lua"
     echo "$END_MARK"
   } >> "$BINDINGS"
   ok "keybindings written to ${BINDINGS/#$HOME/\~}"
@@ -138,12 +143,12 @@ fi
 
 # ---- seed config and report -------------------------------------------------
 
-"$SCRIPT_DIR/bin/utter" status >/dev/null 2>&1 || true
+"$CLI" status >/dev/null 2>&1 || true
 ok "grammar seeded at ~/.config/omarchy/utter/commands.json"
 
 echo
-"$SCRIPT_DIR/bin/utter" doctor || true
+"$CLI" doctor || true
 echo
 echo "  Hold F10 and say \"focus left\"."
-echo "  Everything you can say:  $SCRIPT_DIR/bin/utter commands"
+echo "  Everything you can say:  $CLI commands"
 echo

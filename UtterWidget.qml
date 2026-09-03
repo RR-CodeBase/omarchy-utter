@@ -293,7 +293,7 @@ Panel {
               color: root.panelText
               opacity: 0.7
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.small
+              font.pixelSize: Style.font.bodySmall
               anchors.left: parent.left
               anchors.verticalCenter: parent.verticalCenter
             }
@@ -306,7 +306,7 @@ Panel {
               horizontalAlignment: Text.AlignRight
               color: root.panelText
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.small
+              font.pixelSize: Style.font.bodySmall
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
             }
@@ -337,7 +337,7 @@ Panel {
             color: root.panelText
             opacity: 0.8
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.small
+            font.pixelSize: Style.font.bodySmall
           }
         }
 
