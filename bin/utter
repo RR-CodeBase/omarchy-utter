@@ -58,6 +58,7 @@ DEFAULT_SETTINGS = {
     "stripWakeWords": True,
     "voxtype": "",
     "model": "",
+    "source": "",
 }
 
 # Words whisper sprinkles in that never carry meaning for a command.
@@ -403,34 +404,90 @@ VOXTYPE_FALLBACKS = [
     "/usr/lib/voxtype/voxtype-avx2",
 ]
 
+# A binary staged here is used only when Voxtype is not installed system-wide.
+# It is deliberately not on PATH and is tried last, so `omarchy voxtype install`
+# always wins once it has been run, and this copy can be deleted at any time.
+STAGED_DIR = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "utter" / "voxtype"
+
+
+def _executable(path) -> bool:
+    return Path(path).is_file() and os.access(path, os.X_OK)
+
 
 def find_voxtype() -> str | None:
     explicit = os.environ.get("UTTER_VOXTYPE") or settings().get("voxtype") or ""
-    if explicit and Path(explicit).is_file() and os.access(explicit, os.X_OK):
+    if explicit and _executable(explicit):
         return explicit
     found = shutil.which("voxtype")
     if found:
         return found
     for candidate in VOXTYPE_FALLBACKS:
-        if Path(candidate).is_file() and os.access(candidate, os.X_OK):
+        if _executable(candidate):
             return candidate
+    if STAGED_DIR.is_dir():
+        for candidate in sorted(STAGED_DIR.glob("voxtype-*")):
+            if _executable(candidate):
+                return str(candidate)
     return None
 
 
+def voxtype_is_staged(path: str | None) -> bool:
+    return bool(path) and str(path).startswith(str(STAGED_DIR))
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+# Voxtype writes progress lines to STDOUT, alongside the transcript:
+#
+#     Loading audio file: "/path/to.wav"
+#     Audio format: 16000 Hz, 1 channel(s), Int
+#     Processing 81600 samples (5.10s)...
+#     <blank>
+#     Ask not what your country can do for you.
+#
+# and for audio it could make nothing of, that last line is blank. So the
+# transcript is everything after the first blank line -- not "the last line",
+# which silently returns a log line whenever the transcript is empty. A log
+# line reaching the matcher is the one failure mode that could run a command
+# nobody asked for, so the noise patterns below stay as a second gate in case
+# the output format ever changes.
+NOISE_RES = [
+    re.compile(r"^Loading audio file:"),
+    re.compile(r"^Audio format:"),
+    re.compile(r"^Processing\s+\d+\s+samples"),
+    re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"),
+    re.compile(r"\b(INFO|WARN|WARNING|DEBUG|TRACE|ERROR)\b"),
+    re.compile(r"^(whisper_|ggml_|main:|system_info)"),
+    re.compile(r"^Transcription completed"),
+]
+
+
+def parse_transcript(stdout: str) -> str:
+    """The transcript from voxtype's stdout, or "" if it said nothing."""
+    lines = [ANSI_RE.sub("", ln).strip() for ln in (stdout or "").splitlines()]
+    body = lines
+    for i, line in enumerate(lines):
+        if line == "":
+            body = lines[i + 1:]
+            break
+    kept = [ln for ln in body if ln and not any(rx.search(ln) for rx in NOISE_RES)]
+    return kept[-1] if kept else ""
+
+
 def transcribe(wav: Path) -> str:
-    """Voxtype prints logs on stderr and the transcript on stdout."""
     binary = find_voxtype()
     if not binary:
         raise RuntimeError("Voxtype not found - run: omarchy voxtype install")
-    args = [binary, "transcribe", str(wav)]
+    args = [binary, "-q"]
     model = settings().get("model") or ""
     if model:
-        args = [binary, "--model", model, "transcribe", str(wav)]
+        args += ["--model", model]
+    args += ["transcribe", str(wav)]
     proc = subprocess.run(args, capture_output=True, text=True, timeout=120)
     if proc.returncode != 0:
-        raise RuntimeError((proc.stderr or "").strip().splitlines()[-1:] or "voxtype failed")
-    lines = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
-    return lines[-1] if lines else ""
+        tail = (proc.stderr or "").strip().splitlines()
+        raise RuntimeError(ANSI_RE.sub("", tail[-1]) if tail else "voxtype failed")
+    return parse_transcript(proc.stdout)
 
 
 # ---------------------------------------------------------------- recording
@@ -461,10 +518,13 @@ def record_start(max_seconds: int) -> bool:
         WAV_FILE.unlink()
     except OSError:
         pass
-    args = [
-        "pw-record", "--rate", "16000", "--channels", "1",
-        "--format", "s16", str(WAV_FILE),
-    ]
+    args = ["pw-record", "--rate", "16000", "--channels", "1", "--format", "s16"]
+    # An explicit capture device, for machines where the default source is the
+    # wrong one. `pactl list sources short` lists the names.
+    source = os.environ.get("UTTER_SOURCE") or settings().get("source") or ""
+    if source:
+        args += ["--target", source]
+    args.append(str(WAV_FILE))
     if shutil.which("timeout"):
         args = ["timeout", "-s", "INT", str(max_seconds)] + args
     log = open(RECORD_LOG, "wb")
@@ -577,10 +637,11 @@ def interpret(raw: str, dry: bool = False, quiet: bool = False) -> int:
     hit, cleaned = m.match(raw, float(s.get("threshold", 0.80)), s.get("stripWakeWords", True))
 
     if hit is None:
-        set_state(state="unheard", heard=raw, action="", score=0)
-        add_history({"at": time.time(), "heard": raw, "matched": None})
-        if not quiet:
-            osd("Didn't catch that", "microphone")
+        if not dry:
+            set_state(state="unheard", heard=raw, action="", score=0)
+            add_history({"at": time.time(), "heard": raw, "matched": None})
+            if not quiet:
+                osd("Didn't catch that", "microphone")
         print(json.dumps({"heard": raw, "cleaned": cleaned, "matched": None}))
         return 1
 
@@ -604,11 +665,14 @@ def interpret(raw: str, dry: bool = False, quiet: bool = False) -> int:
         return 2
 
     if ok:
-        set_state(state="ok", heard=raw, action=hit.label, score=hit.score)
-        add_history({"at": time.time(), "heard": raw, "matched": hit.cmd.get("id"),
-                     "label": hit.label, "score": round(hit.score, 3)})
-        if not quiet and not dry:
-            osd(hit.label, "microphone")
+        # A dry run reports what would happen; it must not leave a trace in the
+        # state the widget reads or in the history the user reviews.
+        if not dry:
+            set_state(state="ok", heard=raw, action=hit.label, score=hit.score)
+            add_history({"at": time.time(), "heard": raw, "matched": hit.cmd.get("id"),
+                         "label": hit.label, "score": round(hit.score, 3)})
+            if not quiet:
+                osd(hit.label, "microphone")
         return 0
 
     set_state(state="error", heard=raw, action=hit.label, error=detail)
@@ -759,7 +823,11 @@ def cmd_doctor(args) -> int:
         print(f"[{mark}] {label}{(' - ' + detail) if detail else ''}")
 
     binary = find_voxtype()
-    check("Voxtype binary", bool(binary), binary or "run: omarchy voxtype install")
+    if voxtype_is_staged(binary):
+        check("Voxtype binary", True,
+              f"{binary} (staged fallback - run `omarchy voxtype install` for the packaged one)")
+    else:
+        check("Voxtype binary", bool(binary), binary or "run: omarchy voxtype install")
     models = list((HOME / ".local/share/voxtype/models").glob("*.bin"))
     check("Whisper model", bool(models),
           ", ".join(m.name for m in models) or "run: voxtype setup --download")

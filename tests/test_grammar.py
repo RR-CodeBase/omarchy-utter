@@ -196,6 +196,54 @@ hit = match("focus left")
 check("word slot labels as a word", hit and hit.label == "Focus left",
       hit.label if hit else "")
 
+# ---- transcript parsing ---------------------------------------------------
+# Voxtype puts progress lines on stdout next to the transcript. These are
+# verbatim captures from voxtype 0.7.5. The empty-transcript case is the
+# dangerous one: before the blank-line rule, "Transcription completed in 1.81s"
+# was returned as the transcript and fed straight into the matcher.
+
+SPEECH_OUT = (
+    'Loading audio file: "/tmp/a.wav"\n'
+    "Audio format: 16000 Hz, 1 channel(s), Int\n"
+    "Processing 81600 samples (5.10s)...\n"
+    "\n"
+    "Ask not what your country can do for you.\n"
+)
+SILENT_OUT = (
+    'Loading audio file: "/tmp/b.wav"\n'
+    "Audio format: 16000 Hz, 1 channel(s), Int\n"
+    "Processing 93157 samples (5.82s)...\n"
+    "\n"
+    "\n"
+)
+VERBOSE_OUT = (
+    '\x1b[2m2026-09-03T20:52:41.735778Z\x1b[0m \x1b[32m INFO\x1b[0m '
+    'Transcription completed in 1.81s: ""\n'
+    "\n"
+    "\n"
+)
+
+check("transcript: real speech output",
+      utter.parse_transcript(SPEECH_OUT) == "Ask not what your country can do for you.",
+      repr(utter.parse_transcript(SPEECH_OUT)))
+check("transcript: silent audio yields nothing",
+      utter.parse_transcript(SILENT_OUT) == "", repr(utter.parse_transcript(SILENT_OUT)))
+check("transcript: ANSI log line is not a transcript",
+      utter.parse_transcript(VERBOSE_OUT) == "", repr(utter.parse_transcript(VERBOSE_OUT)))
+check("transcript: bare line with no blank separator",
+      utter.parse_transcript("Focus left.") == "Focus left.")
+check("transcript: noise with no blank separator yields nothing",
+      utter.parse_transcript("whisper_init_state: kv self size = 6.29 MB") == "")
+check("transcript: empty input", utter.parse_transcript("") == "")
+check("transcript: whitespace only", utter.parse_transcript("\n  \n\t\n") == "")
+check("transcript: multi-line transcript keeps the last line",
+      utter.parse_transcript("Processing 1 samples...\n\nfocus left\n") == "focus left")
+
+# The whole point: nothing voxtype prints around a failed transcription may
+# reach the matcher.
+for noisy in [SILENT_OUT, VERBOSE_OUT, "whisper_init_state: compute buffer = 96 MB\n"]:
+    check("no command matches voxtype noise", match(utter.parse_transcript(noisy)) is None)
+
 # ---- normalization helpers ------------------------------------------------
 
 check("normalize strips punctuation", utter.normalize("Focus, left!") == "focus left")
