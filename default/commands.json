@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "wakeWords": [
     "omarchy",
     "computer",
@@ -74,28 +74,6 @@
       "10": [
         "ten",
         "10"
-      ]
-    },
-    "app": {
-      "browser": [
-        "browser",
-        "the browser",
-        "chrome",
-        "chromium",
-        "firefox"
-      ],
-      "terminal": [
-        "terminal",
-        "the terminal",
-        "a terminal",
-        "console",
-        "shell"
-      ],
-      "editor": [
-        "editor",
-        "the editor",
-        "my editor",
-        "code"
       ]
     }
   },
@@ -273,13 +251,16 @@
       "id": "app.launch",
       "group": "Apps",
       "say": [
-        "open {app}",
-        "launch {app}",
-        "new {app}",
-        "start {app}"
+        "open {appname}",
+        "launch {appname}",
+        "start {appname}",
+        "open up {appname}",
+        "bring up {appname}",
+        "switch to {appname}"
       ],
-      "run": "omarchy launch {app}",
-      "label": "Open {app}"
+      "label": "Open {appname}",
+      "internal": "launch",
+      "note": "resolved against installed apps; free text never reaches a shell"
     },
     {
       "id": "menu.open",
@@ -557,9 +538,11 @@
         "show commands",
         "help"
       ],
-      "run": "omarchy menu utter",
       "internal": "commands",
       "label": "What can I say?"
     }
+  ],
+  "freeSlots": [
+    "appname"
   ]
 }

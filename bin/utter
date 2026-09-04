@@ -173,10 +173,11 @@ def grammar() -> dict:
 # ---------------------------------------------------------------- matching
 
 class Match:
-    def __init__(self, cmd, slots, score, phrase, labels=None):
+    def __init__(self, cmd, slots, score, phrase, labels=None, free=None):
         self.cmd = cmd
         self.slots = slots            # canonical values, for the run line
         self.labels = labels or {}    # human-readable values, for the label
+        self.free = free or {}        # raw speech, for internal handlers only
         self.score = score
         self.phrase = phrase
 
@@ -212,6 +213,11 @@ class Matcher:
     def __init__(self, g: dict):
         self.g = g
         self.slots = g.get("slots", {}) or {}
+        # A free slot captures whatever was said rather than choosing from a
+        # list. Its text can never reach a command line: only commands with an
+        # `internal` handler may use one, and the handler resolves the text
+        # against something real (an installed app) before anything runs.
+        self.free_slots = set(g.get("freeSlots", []) or [])
         self.wake = sorted(
             (normalize(w) for w in g.get("wakeWords", []) or []),
             key=len, reverse=True,
@@ -256,15 +262,18 @@ class Matcher:
                     regex = re.compile(r"^" + re.escape(norm) + r"$")
                     self.entries.append((cmd, template, regex, []))
                     continue
-                if any(n not in self.slots for n in names):
+                if any(n not in self.slots and n not in self.free_slots for n in names):
                     continue  # a template referencing an unknown slot is dead
                 chunks = []
                 for i, part in enumerate(parts):
                     if part:
                         chunks.append(part)
                     if i < len(names):
-                        alts = "|".join(re.escape(f) for f in self._forms(names[i]))
-                        chunks.append(f"(?P<s{i}>{alts})")
+                        if names[i] in self.free_slots:
+                            chunks.append(f"(?P<s{i}>[a-z0-9][a-z0-9 ]{{0,38}}?)")
+                        else:
+                            alts = "|".join(re.escape(f) for f in self._forms(names[i]))
+                            chunks.append(f"(?P<s{i}>{alts})")
                 regex = re.compile(r"^\s*" + r"\s*".join(c for c in chunks if c) + r"\s*$")
                 self.entries.append((cmd, template, regex, names))
 
@@ -291,9 +300,14 @@ class Matcher:
                 continue
             slots = {}
             labels = {}
+            free = {}
             ok = True
             for i, name in enumerate(names):
                 spoken = m.group(f"s{i}")
+                if name in self.free_slots:
+                    free[name] = spoken.strip()
+                    labels[name] = spoken.strip()
+                    continue
                 canon = self.spoken_to_canon.get(name, {}).get(spoken)
                 if canon is None:
                     ok = False
@@ -305,7 +319,7 @@ class Matcher:
             # Prefer the most specific template: the one with the most literal text.
             literal = len(normalize(self.SLOT_RE.sub(" ", template)))
             if best is None or literal > best[0]:
-                best = (literal, Match(cmd, slots, 1.0, template, labels))
+                best = (literal, Match(cmd, slots, 1.0, template, labels, free))
         return best[1] if best else None
 
     def _expand(self):
@@ -317,6 +331,8 @@ class Matcher:
             if not names:
                 out.append((normalize(template), cmd, {}, {}))
                 continue
+            if any(n in self.free_slots for n in names):
+                continue  # nothing to enumerate; the exact pass handles these
             choices = []
             for name in names:
                 table = self.slots.get(name, {}) or {}
@@ -377,6 +393,168 @@ class Matcher:
         if hit is None and lean != text:
             hit = self._fuzzy(lean, threshold)
         return hit, text
+
+
+# ---------------------------------------------------------------- apps
+
+APP_ALIASES = {
+    "browser": "omarchy launch browser",
+    "the browser": "omarchy launch browser",
+    "web browser": "omarchy launch browser",
+    "terminal": "omarchy launch terminal",
+    "a terminal": "omarchy launch terminal",
+    "the terminal": "omarchy launch terminal",
+    "console": "omarchy launch terminal",
+    "editor": "omarchy launch editor",
+    "my editor": "omarchy launch editor",
+    "the editor": "omarchy launch editor",
+    "files": "omarchy launch nautilus",
+    "file manager": "omarchy launch nautilus",
+    "the files": "omarchy launch nautilus",
+    "finder": "omarchy launch nautilus",
+}
+
+DIGIT_WORDS = {"0": "zero", "1": "one", "2": "two", "3": "three", "4": "four",
+               "5": "five", "6": "six", "7": "seven", "8": "eight", "9": "nine"}
+
+DESKTOP_DIRS = [
+    Path("/usr/share/applications"),
+    Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "applications",
+    Path("/var/lib/flatpak/exports/share/applications"),
+]
+
+
+def desktop_apps() -> list[dict]:
+    """Every app the user could launch from a menu, with what to match on.
+
+    Parsed by hand rather than with configparser: desktop files legitimately
+    contain duplicate keys and stray lines that make a strict parser throw,
+    and one bad file should not cost the user their whole app list.
+    """
+    apps = []
+    for directory in DESKTOP_DIRS:
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("*.desktop")):
+            entry, in_section = {}, False
+            try:
+                for line in path.read_text(errors="replace").splitlines():
+                    line = line.strip()
+                    if line.startswith("["):
+                        in_section = line == "[Desktop Entry]"
+                        continue
+                    if not in_section or "=" not in line or line.startswith("#"):
+                        continue
+                    key, _, value = line.partition("=")
+                    entry.setdefault(key.strip(), value.strip())
+            except OSError:
+                continue
+            if entry.get("Type") != "Application":
+                continue
+            if entry.get("NoDisplay", "").lower() == "true":
+                continue
+            if entry.get("Hidden", "").lower() == "true":
+                continue
+            name = entry.get("Name", "")
+            if not name:
+                continue
+            exec_line = entry.get("Exec", "")
+            binary = ""
+            for token in shlex.split(exec_line.replace("%", "%%")) if exec_line else []:
+                if "=" in token or token.startswith("%"):
+                    continue
+                binary = Path(token).name
+                break
+            apps.append({
+                "id": path.name,
+                "name": name,
+                "binary": binary,
+                "wmclass": entry.get("StartupWMClass", ""),
+                "keywords": entry.get("Keywords", ""),
+                "generic": entry.get("GenericName", ""),
+            })
+    return apps
+
+
+def resolve_app(spoken: str, apps=None):
+    """Find the installed app someone meant. None rather than a wrong guess."""
+    want = normalize(spoken)
+    if not want:
+        return None
+    apps = desktop_apps() if apps is None else apps
+
+    def candidates(app):
+        out = [app["name"], app["binary"], app["id"].removesuffix(".desktop"),
+               app["wmclass"], app["generic"]]
+        # org.gnome.Nautilus -> Nautilus; brave-browser -> brave browser
+        for extra in list(out):
+            if extra and "." in extra:
+                out.append(extra.rsplit(".", 1)[-1])
+            if extra and "-" in extra:
+                out.append(extra.replace("-", " "))
+        forms = [normalize(c) for c in out if c]
+        # Whisper writes "one password"; the app is called 1Password.
+        for form in list(forms):
+            spelled = re.sub(r"\d", lambda m: " " + DIGIT_WORDS[m.group()] + " ", form)
+            spelled = re.sub(r"\s+", " ", spelled).strip()
+            if spelled != form:
+                forms.append(spelled)
+        return forms
+
+    best, best_score = None, 0.0
+    for app in apps:
+        for candidate in candidates(app):
+            if not candidate:
+                continue
+            if candidate == want:
+                return app, 1.0
+            # "open brave browser" should find Brave; "open code" should not
+            # find "Visual Studio Code Insiders" ahead of "Code".
+            if want in candidate.split() or candidate.startswith(want + " "):
+                score = 0.95
+            else:
+                score = difflib.SequenceMatcher(None, want, candidate).ratio()
+            if score > best_score:
+                best, best_score = app, score
+    if best is not None and best_score >= 0.78:
+        return best, best_score
+    return None
+
+
+def launch_app(spoken: str) -> tuple[bool, str]:
+    """Aliases first, then the installed app list. Only ever launches
+    something that actually exists, so free speech never reaches a shell."""
+    key = normalize(spoken)
+    if key in APP_ALIASES:
+        command = APP_ALIASES[key]
+        try:
+            subprocess.Popen(shlex.split(command), stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+        except Exception as exc:
+            return False, str(exc)
+        return True, spoken
+
+    hit = resolve_app(spoken)
+    if hit is None:
+        return False, f"no app called \u201c{spoken}\u201d"
+    app, _score = hit
+    pattern = app["wmclass"] or app["binary"] or app["name"]
+    launcher = f"uwsm-app -- gtk-launch {shlex.quote(app['id'])}"
+    if not shutil.which("gtk-launch"):
+        launcher = f"uwsm-app -- {shlex.quote(app['binary'] or app['name'])}"
+    if not shutil.which("uwsm-app"):
+        launcher = f"gtk-launch {shlex.quote(app['id'])}"
+    try:
+        if shutil.which("omarchy-launch-or-focus"):
+            subprocess.Popen(["omarchy-launch-or-focus", pattern, launcher],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+        else:
+            subprocess.Popen(shlex.split(launcher), stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+    except Exception as exc:
+        return False, str(exc)
+    return True, app["name"]
 
 
 # ---------------------------------------------------------------- feedback
@@ -634,8 +812,22 @@ def clear_confirm() -> None:
         pass
 
 
+INTERNAL_HANDLERS = {}
+
+
 def execute(match: Match, dry: bool = False) -> tuple[bool, str]:
     cmd = match.cmd
+    handler = cmd.get("internal")
+    if handler:
+        if handler not in INTERNAL_HANDLERS:
+            return False, f"unknown handler {handler!r}"
+        if cmd.get("confirm") and not dry and not pending_confirm(cmd.get("id", "")):
+            arm_confirm(cmd.get("id", ""))
+            return False, "confirm"
+        if not dry:
+            clear_confirm()
+        return INTERNAL_HANDLERS[handler](match, dry)
+
     rendered = match.rendered
     if not rendered:
         return False, "command has no run line"
@@ -706,6 +898,8 @@ def interpret(raw: str, dry: bool = False, quiet: bool = False) -> int:
         return 1
 
     ok, detail = execute(hit, dry=dry)
+    if ok and hit.cmd.get("internal") == "launch" and detail and not detail.startswith("omarchy "):
+        hit.labels["appname"] = detail
     payload = {
         "heard": raw,
         "cleaned": cleaned,
@@ -739,6 +933,43 @@ def interpret(raw: str, dry: bool = False, quiet: bool = False) -> int:
     if not quiet:
         osd(f"Failed: {detail}", "microphone")
     return 3
+
+
+# ---------------------------------------------------------------- handlers
+
+def _handle_launch(match: Match, dry: bool = False) -> tuple[bool, str]:
+    spoken = (match.free.get("appname") or "").strip()
+    if not spoken:
+        return False, "no app named"
+    if dry:
+        # Resolve for real so --dry-run tells the truth about an app that is
+        # not installed, instead of reporting a launch that would fail.
+        key = normalize(spoken)
+        if key in APP_ALIASES:
+            return True, APP_ALIASES[key]
+        hit = resolve_app(spoken)
+        if hit is None:
+            return False, f"no app called \u201c{spoken}\u201d"
+        return True, hit[0]["name"]
+    return launch_app(spoken)
+
+
+def _handle_commands(match: Match, dry: bool = False) -> tuple[bool, str]:
+    """`omarchy menu utter` was never a real command, so this always failed."""
+    if dry:
+        return True, "list of commands"
+    cli = str(Path(__file__).resolve())
+    launcher = shutil.which("omarchy-launch-floating-terminal-with-presentation")
+    args = [launcher, cli, "commands"] if launcher else [cli, "commands"]
+    try:
+        subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except Exception as exc:
+        return False, str(exc)
+    return True, "commands"
+
+
+INTERNAL_HANDLERS.update({"launch": _handle_launch, "commands": _handle_commands})
 
 
 # ---------------------------------------------------------------- commands
@@ -913,7 +1144,8 @@ def cmd_doctor(args) -> int:
     dupes = {i for i in ids if ids.count(i) > 1}
     check("Unique command ids", not dupes, ", ".join(sorted(dupes)) if dupes else "")
 
-    slots = set((g.get("slots") or {}).keys())
+    free = set(g.get("freeSlots") or [])
+    slots = set((g.get("slots") or {}).keys()) | free
     missing = set()
     for c in cmds:
         for t in c.get("say", []):
@@ -922,10 +1154,29 @@ def cmd_doctor(args) -> int:
                     missing.add(f"{c.get('id')}:{name}")
     check("Slots resolve", not missing, ", ".join(sorted(missing)) if missing else "")
 
+    # Free text may only reach a handler that resolves it against something
+    # real. A free slot in a run line would put raw speech on a command line.
+    leaked, orphaned = [], []
+    for c in cmds:
+        for name in Matcher.SLOT_RE.findall(c.get("run", "")):
+            if name in free:
+                leaked.append(f"{c.get('id')}:{name}")
+        uses_free = any(n in free for t in c.get("say", [])
+                        for n in Matcher.SLOT_RE.findall(t))
+        if uses_free and not c.get("internal"):
+            leaked.append(f"{c.get('id')}: free slot without a handler")
+        if c.get("internal") and c["internal"] not in INTERNAL_HANDLERS:
+            orphaned.append(f"{c.get('id')} -> {c['internal']}")
+    check("Free slots stay out of run lines", not leaked, ", ".join(leaked) if leaked else "")
+    check("Internal handlers exist", not orphaned, ", ".join(orphaned) if orphaned else "")
+
+    apps = desktop_apps()
+    check("Installed apps indexed", len(apps) > 0, f"{len(apps)} launchable apps")
+
     unresolved = []
     for c in cmds:
         run = c.get("run", "")
-        if not run or c.get("shell"):
+        if not run or c.get("shell") or c.get("internal"):
             continue
         head = shlex.split(render(run, {k: "1" for k in slots}))[:1]
         if head and not shutil.which(head[0]):

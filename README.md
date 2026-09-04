@@ -67,7 +67,7 @@ display, focus modes, capture and session. A few of them:
 | "workspace three" | `hl.dsp.focus({ workspace = "3" })` |
 | "throw this to two" | `hl.dsp.window.move({ workspace = "2" })` |
 | "close window" | `hl.dsp.window.close()` |
-| "open the terminal" | `omarchy launch terminal` |
+| "open teams" / "open one password" | resolved against your installed apps |
 | "take a screenshot" | `omarchy capture screenshot region` |
 | "do not disturb" | `omarchy toggle notification silencing` |
 | "lock the screen" | `omarchy system lock` |
@@ -90,8 +90,8 @@ Add a command by adding an entry:
 }
 ```
 
-Slots let one entry cover many phrasings. `{dir}`, `{num}` and `{app}` ship by
-default, and you can add your own under `slots`:
+Slots let one entry cover many phrasings. `{dir}` and `{num}` ship by default,
+and you can add your own under `slots`:
 
 ```json
 {
@@ -105,6 +105,21 @@ default, and you can add your own under `slots`:
 A slot maps what you *say* to what gets *run*: `"l": ["left"]` means saying
 "left" substitutes `l`. Only the canonical value ever reaches the command line,
 so what you say can never inject arguments.
+
+### Opening apps
+
+"open *anything*" is resolved against the apps actually installed on your
+machine — the `.desktop` entries a menu would show you — matching on the app's
+name, its binary, its window class and its file id, and tolerating how speech
+comes out ("one password" finds 1Password, "x journal" finds Xournal++). If
+nothing matches well enough you get *"no app called …"* rather than the nearest
+alphabetical guess, because opening the wrong app is worse than opening none.
+
+This is the one place free speech enters the system, so it is fenced: a free
+slot (`{appname}`) may only be used by a command with an `internal` handler,
+never by one with a `run` line, and the handler launches a resolved desktop
+entry rather than anything the microphone heard. `utter doctor` enforces both
+rules, and the test suite asserts them over the whole grammar.
 
 Hyprland commands go through its Lua dispatcher API (`hl.dsp.…`), not the
 older `hyprctl dispatch workspace 3` form — that one is accepted by the CLI
@@ -183,9 +198,10 @@ command palette that shares the grammar.
 python3 tests/test_grammar.py
 ```
 
-175 assertions covering slot canonicalization, homophones, transcription noise,
+215 assertions covering slot canonicalization, homophones, transcription noise,
 fuzzy tolerance, argument-injection safety, a corpus of ordinary speech that
-must never match a command, and the phrasings real use turned up. Plus
+must never match a command, the app resolver, the rule that free speech never
+reaches a command line, and the phrasings real use turned up. Plus
 `tests/test_pipeline.py`, which drives real audio through whisper into the
 matcher and out to a process.
 

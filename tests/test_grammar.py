@@ -79,8 +79,9 @@ expect("go to workspace 9", "workspace.go", DSP + '\'hl.dsp.focus({ workspace = 
 expect("next workspace", "workspace.next")
 expect("previous workspace", "workspace.prev")
 expect("throw this to 5", "workspace.throw", DSP + '\'hl.dsp.window.move({ workspace = "5" })\'')
-expect("open the browser", "app.launch", "omarchy launch browser")
-expect("launch terminal", "app.launch", "omarchy launch terminal")
+# These no longer carry a run line: app names go through the resolver.
+expect("open the browser", "app.launch")
+expect("launch terminal", "app.launch")
 expect("show clipboard", "clipboard.open")
 expect("volume up", "volume.up")
 expect("mute the microphone", "mic.mute")
@@ -161,6 +162,102 @@ for phrase in [
 ]:
     expect_none(phrase)
 
+# ---- app launching by name -------------------------------------------------
+# The enumerated three-app slot could not open the other 73 apps on this
+# machine, so app names are free text resolved against installed .desktop
+# entries. That means the one place raw speech enters the system, and the
+# safety rule is that it may only ever reach a handler, never a command line.
+
+for phrase, spoken in [
+    ("open files", "files"),
+    ("launch files", "files"),
+    ("open brave", "brave"),
+    ("start ghostty", "ghostty"),
+    ("bring up teams", "teams"),
+    ("switch to chromium", "chromium"),
+    ("open up one password", "one password"),
+]:
+    hit = match(phrase)
+    ok = hit is not None and hit.cmd["id"] == "app.launch" and hit.free.get("appname") == spoken
+    check(f"{phrase!r} captures {spoken!r}", ok,
+          f"{hit.cmd['id'] if hit else None} {hit.free if hit else {}}")
+
+check("app.launch has no run line",
+      not next(c for c in GRAMMAR["commands"] if c["id"] == "app.launch").get("run"))
+check("app.launch is handled internally",
+      next(c for c in GRAMMAR["commands"] if c["id"] == "app.launch").get("internal") == "launch")
+
+# The rule, asserted over the whole grammar rather than one command.
+free_slots = set(GRAMMAR.get("freeSlots", []))
+check("free slots are declared", free_slots == {"appname"}, str(free_slots))
+for cmd in GRAMMAR["commands"]:
+    uses_free = any(name in free_slots
+                    for t in cmd["say"] for name in utter.Matcher.SLOT_RE.findall(t))
+    if uses_free:
+        check(f"{cmd['id']} with a free slot has no run line", not cmd.get("run"))
+        check(f"{cmd['id']} with a free slot has a handler", bool(cmd.get("internal")))
+    for name in utter.Matcher.SLOT_RE.findall(cmd.get("run", "")):
+        check(f"{cmd['id']} run line has no free slot", name not in free_slots)
+
+# Speech that would be dangerous if it ever reached a shell.
+for nasty in ["open files; rm -rf ~", "open $(whoami)", "launch foo && curl evil.sh",
+              "open `id`", "open foo | tee /tmp/x"]:
+    hit = match(nasty)
+    if hit is None:
+        check(f"{nasty[:28]!r} is safe", True)
+        continue
+    captured = hit.free.get("appname", "")
+    check(f"{nasty[:28]!r} captures nothing dangerous",
+          all(ch not in captured for ch in [";", "|", "&", "$", "`", "(", ")"]),
+          repr(captured))
+    check(f"{nasty[:28]!r} produces no run line", not hit.rendered)
+
+# Every internal handler named in the grammar must exist.
+for cmd in GRAMMAR["commands"]:
+    if cmd.get("internal"):
+        check(f"{cmd['id']} handler {cmd['internal']!r} exists",
+              cmd["internal"] in utter.INTERNAL_HANDLERS,
+              str(list(utter.INTERNAL_HANDLERS)))
+
+# ---- the app resolver ------------------------------------------------------
+# Against a fixed list, so the assertions do not depend on what is installed.
+
+FAKE_APPS = [
+    {"id": "org.gnome.Nautilus.desktop", "name": "Files", "binary": "nautilus",
+     "wmclass": "org.gnome.Nautilus", "keywords": "", "generic": "File Manager"},
+    {"id": "brave-browser.desktop", "name": "Brave", "binary": "brave",
+     "wmclass": "brave-browser", "keywords": "", "generic": "Web Browser"},
+    {"id": "1password.desktop", "name": "1Password", "binary": "1password",
+     "wmclass": "1Password", "keywords": "", "generic": ""},
+    {"id": "com.mitchellh.ghostty.desktop", "name": "Ghostty", "binary": "ghostty",
+     "wmclass": "com.mitchellh.ghostty", "keywords": "", "generic": "Terminal"},
+    {"id": "com.github.xournalpp.xournalpp.desktop", "name": "Xournal++",
+     "binary": "xournalpp", "wmclass": "", "keywords": "", "generic": ""},
+]
+
+for spoken, expected in [
+    ("files", "Files"),
+    ("nautilus", "Files"),
+    ("file manager", "Files"),
+    ("brave", "Brave"),
+    ("brave browser", "Brave"),
+    ("ghostty", "Ghostty"),
+    ("one password", "1Password"),     # whisper spells the digit out
+    ("1password", "1Password"),
+    ("x journal", "Xournal++"),
+]:
+    got = utter.resolve_app(spoken, FAKE_APPS)
+    check(f"resolve {spoken!r} -> {expected}", got is not None and got[0]["name"] == expected,
+          got[0]["name"] if got else "no match")
+
+# An app that is not installed must resolve to nothing, not to the nearest
+# thing alphabetically -- opening the wrong app is worse than opening none.
+for spoken in ["spotify", "slack", "gimp", "photoshop", "zzzz", ""]:
+    check(f"resolve {spoken!r} -> nothing", utter.resolve_app(spoken, FAKE_APPS) is None,
+          str(utter.resolve_app(spoken, FAKE_APPS)))
+
+check("desktop_apps reads this machine", len(utter.desktop_apps()) > 0)
+
 # ---- destructive commands are gated --------------------------------------
 
 for cid in ["session.reboot", "session.shutdown", "session.sleep"]:
@@ -173,7 +270,7 @@ ids = [c["id"] for c in GRAMMAR["commands"]]
 check("command ids unique", len(ids) == len(set(ids)),
       f"dupes: {[i for i in ids if ids.count(i) > 1]}")
 
-slots = set(GRAMMAR.get("slots", {}))
+slots = set(GRAMMAR.get("slots", {})) | set(GRAMMAR.get("freeSlots", []))
 for cmd in GRAMMAR["commands"]:
     for template in cmd["say"]:
         for name in utter.Matcher.SLOT_RE.findall(template):
