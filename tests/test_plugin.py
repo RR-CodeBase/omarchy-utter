@@ -89,6 +89,46 @@ for section in ["## Install", "## Usage", "## Configure", "## Remove"]:
     check(f"README has an {section.strip('# ')} section", section in readme)
 check("README documents removal by id", MANIFEST["id"] in readme)
 
+# ---- the CLI, its completion, and the installer that wires them up ----------
+
+# The READMEs document bare `<cli> ...` commands, so something has to put the
+# CLI on PATH. install.sh does, and must undo it again on --uninstall.
+
+CLI_NAME = MANIFEST["id"].rsplit(".", 1)[-1]
+cli = ROOT / "bin" / CLI_NAME
+check(f"bin/{CLI_NAME} exists and is executable", cli.is_file() and os.access(cli, os.X_OK))
+
+completion = ROOT / "completions" / CLI_NAME
+check(f"completions/{CLI_NAME} is shipped", completion.is_file())
+if completion.is_file():
+    r = subprocess.run(["bash", "-n", str(completion)], capture_output=True, text=True)
+    check("completion is valid bash", r.returncode == 0, r.stderr.strip()[:200])
+    check("completion registers the command",
+          f"complete -F _{CLI_NAME} {CLI_NAME}" in completion.read_text())
+
+installer = ROOT / "install.sh"
+check("install.sh is present and executable", installer.is_file() and os.access(installer, os.X_OK))
+if installer.is_file():
+    sh = installer.read_text()
+    r = subprocess.run(["bash", "-n", str(installer)], capture_output=True, text=True)
+    check("install.sh is valid bash", r.returncode == 0, r.stderr.strip()[:200])
+    check("install.sh links the CLI onto PATH", ".local/bin/" + CLI_NAME in sh)
+    check("install.sh installs the completion", "bash-completion/completions/" + CLI_NAME in sh)
+    # Whatever it creates outside the plugin folder, --uninstall must remove.
+    check("install.sh removes the symlink again", 'rm -f "$BIN_LINK"' in sh)
+    check("install.sh removes the completion again", 'rm -f "$COMPLETION"' in sh)
+
+# ---- listing preview --------------------------------------------------------
+
+previews = [p for p in ROOT.glob("preview.*")
+            if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".avif"}]
+check("exactly one root preview image", len(previews) == 1,
+      "the marketplace reads a single root preview.*: " + str([p.name for p in previews]))
+if previews:
+    size = previews[0].stat().st_size
+    check("preview is under the 50 MB marketplace limit", size < 50 * 1024 * 1024,
+          f"{size / 1e6:.1f} MB")
+
 # ---- omarchy's own validator -----------------------------------------------
 
 if not shutil.which("omarchy"):

@@ -35,9 +35,10 @@ omarchy voxtype install                                              # local tra
 ```
 
 `install.sh` is safe to re-run and only ever touches its own managed block in
-`~/.config/hypr/bindings.lua`. Working from a clone instead? `git clone`, then
-`./install.sh` — it registers the plugin, places the widget and adds the
-binding in one go.
+`~/.config/hypr/bindings.lua`. It also links `utter` into `~/.local/bin` and
+installs bash completion, which is what makes the bare `utter …` commands below
+work. Working from a clone instead? `git clone`, then `./install.sh` — it
+registers the plugin, places the widget and adds the binding in one go.
 
 ## Usage
 
@@ -66,11 +67,11 @@ and settings live beside it. Both are covered below.
 ~/.config/omarchy/plugins/io.github.rr-codebase.utter/install.sh --uninstall
 ```
 
-That removes the keybinding block and the plugin. `omarchy plugin remove
-io.github.rr-codebase.utter` on its own removes the plugin but leaves the
-binding behind. Your grammar and history stay in `~/.config/omarchy/utter/`
-and `~/.local/state/omarchy/` either way; delete those directories to go back
-to nothing.
+That removes the keybinding block, the `utter` symlink, the completion and the
+plugin. `omarchy plugin remove io.github.rr-codebase.utter` on its own removes
+the plugin but leaves the binding behind. Your grammar and history stay in
+`~/.config/omarchy/utter/` and `~/.local/state/omarchy/` either way; delete
+those directories to go back to nothing.
 
 ## What you can say
 

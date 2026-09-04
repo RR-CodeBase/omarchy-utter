@@ -1,0 +1,40 @@
+# bash completion for utter
+_utter() {
+  local cur prev words cword
+  _init_completion 2>/dev/null || {
+    cur=${COMP_WORDS[COMP_CWORD]}
+    prev=${COMP_WORDS[COMP_CWORD-1]}
+    cword=$COMP_CWORD
+  }
+
+  local verbs="ptt listen say match commands status history enable disable toggle doctor selftest"
+
+  if (( cword == 1 )); then
+    COMPREPLY=($(compgen -W "$verbs --help" -- "$cur"))
+    return
+  fi
+
+  # Flags depend on the verb, not on the immediately preceding word, because
+  # `say` and `match` swallow an arbitrary number of words first.
+  case "${COMP_WORDS[1]}" in
+  ptt)
+    (( cword == 2 )) && COMPREPLY=($(compgen -W "start stop" -- "$cur"))
+    return ;;
+  say)
+    [[ $cur == -* ]] && COMPREPLY=($(compgen -W "--dry-run --quiet" -- "$cur"))
+    return ;;
+  match)
+    [[ $prev == --threshold ]] && return
+    [[ $cur == -* ]] && COMPREPLY=($(compgen -W "--threshold" -- "$cur"))
+    return ;;
+  commands | status)
+    COMPREPLY=($(compgen -W "--json" -- "$cur")) ;;
+  history)
+    [[ $prev == --limit ]] && return
+    COMPREPLY=($(compgen -W "--limit" -- "$cur")) ;;
+  selftest)
+    [[ $prev == --seconds ]] && { COMPREPLY=($(compgen -W "3 5 10" -- "$cur")); return; }
+    COMPREPLY=($(compgen -W "--seconds --dry-run" -- "$cur")) ;;
+  esac
+}
+complete -F _utter utter

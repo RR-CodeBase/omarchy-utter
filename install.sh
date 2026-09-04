@@ -12,6 +12,8 @@ PLUGINS_DIR="$HOME/.config/omarchy/plugins"
 BINDINGS="$HOME/.config/hypr/bindings.lua"
 BEGIN_MARK="-- >>> utter (managed) >>>"
 END_MARK="-- <<< utter (managed) <<<"
+BIN_LINK="$HOME/.local/bin/utter"
+COMPLETION="$HOME/.local/share/bash-completion/completions/utter"
 
 WITH_BINDINGS=1
 SECTION="right"
@@ -48,6 +50,8 @@ uninstall() {
   echo
   echo "Removing Utter"
   remove_bindings && ok "keybindings removed"
+  [[ -L $BIN_LINK || -f $BIN_LINK ]] && { rm -f "$BIN_LINK"; ok "removed ${BIN_LINK/#$HOME/\~}"; }
+  [[ -f $COMPLETION ]] && { rm -f "$COMPLETION"; ok "removed shell completion"; }
   if [[ -d "$PLUGINS_DIR/$PLUGIN_ID" ]]; then
     omarchy plugin remove "$PLUGIN_ID" --yes >/dev/null 2>&1 || true
     ok "plugin removed"
@@ -141,6 +145,26 @@ if ((WITH_BINDINGS)); then
   hyprctl reload >/dev/null 2>&1 && ok "hyprland reloaded" || warn "run: hyprctl reload"
 fi
 
+# ---- CLI on PATH -----------------------------------------------------------
+
+# The README documents `utter ...` as a bare command, so put it on PATH. The
+# script itself stays in the plugin; this is only a link to it.
+mkdir -p "$(dirname "$BIN_LINK")"
+ln -sfn "$CLI" "$BIN_LINK"
+ok "utter linked into ${BIN_LINK/#$HOME/\~}"
+# Only advertise the short form if it will actually resolve.
+PRETTY_CLI="$CLI"
+case ":$PATH:" in
+  *":${BIN_LINK%/*}:"*) PRETTY_CLI="utter" ;;
+  *) warn "${BIN_LINK%/*} is not on your PATH - add it to use \`utter\` directly" ;;
+esac
+
+if [[ -f $SCRIPT_DIR/completions/utter ]]; then
+  mkdir -p "$(dirname "$COMPLETION")"
+  install -m 0644 "$SCRIPT_DIR/completions/utter" "$COMPLETION"
+  ok "shell completion installed"
+fi
+
 # ---- seed config and report -------------------------------------------------
 
 "$CLI" status >/dev/null 2>&1 || true
@@ -150,5 +174,5 @@ echo
 "$CLI" doctor || true
 echo
 echo "  Hold F10 and say \"focus left\"."
-echo "  Everything you can say:  $CLI commands"
+echo "  Everything you can say:  $PRETTY_CLI commands"
 echo
