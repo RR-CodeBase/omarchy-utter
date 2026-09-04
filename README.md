@@ -58,15 +58,15 @@ The bar icon shows what is happening: `󰗋` ready, `󰍬` listening, `󰔟` thi
 utter commands          # the full list, grouped
 ```
 
-36 commands out of the box, covering windows, workspaces, apps, sound,
+37 commands out of the box, covering windows, workspaces, apps, sound,
 display, focus modes, capture and session. A few of them:
 
 | Say | Runs |
 |---|---|
-| "focus left" / "go right" | `hyprctl dispatch movefocus l` |
-| "workspace three" | `hyprctl dispatch workspace 3` |
-| "throw this to two" | `hyprctl dispatch movetoworkspace 2` |
-| "close window" | `hyprctl dispatch killactive` |
+| "focus left" / "go right" | `hl.dsp.focus({ direction = "l" })` |
+| "workspace three" | `hl.dsp.focus({ workspace = "3" })` |
+| "throw this to two" | `hl.dsp.window.move({ workspace = "2" })` |
+| "close window" | `hl.dsp.window.close()` |
 | "open the terminal" | `omarchy launch terminal` |
 | "take a screenshot" | `omarchy capture screenshot region` |
 | "do not disturb" | `omarchy toggle notification silencing` |
@@ -106,7 +106,20 @@ A slot maps what you *say* to what gets *run*: `"l": ["left"]` means saying
 "left" substitutes `l`. Only the canonical value ever reaches the command line,
 so what you say can never inject arguments.
 
+Hyprland commands go through its Lua dispatcher API (`hl.dsp.…`), not the
+older `hyprctl dispatch workspace 3` form — that one is accepted by the CLI
+and rejected by the compositor, so it looks like it worked. `utter doctor`
+proves the calling convention against the running compositor and refuses to
+let the legacy form back into the grammar.
+
 After editing, `utter doctor` re-checks the whole file.
+
+### When the shipped grammar changes
+
+The grammar carries a `version`. When Utter ships a newer one, your file is
+replaced and the old one kept beside it as `commands.v<n>.json`, so anything
+you wrote is recoverable. Copy your own commands across and they survive the
+next upgrade too.
 
 ## How the matching works
 
@@ -170,9 +183,11 @@ command palette that shares the grammar.
 python3 tests/test_grammar.py
 ```
 
-132 assertions covering slot canonicalization, homophones, transcription noise,
-fuzzy tolerance, argument-injection safety, and a corpus of ordinary speech
-that must never match a command.
+175 assertions covering slot canonicalization, homophones, transcription noise,
+fuzzy tolerance, argument-injection safety, a corpus of ordinary speech that
+must never match a command, and the phrasings real use turned up. Plus
+`tests/test_pipeline.py`, which drives real audio through whisper into the
+matcher and out to a process.
 
 ## Licence
 

@@ -63,21 +63,22 @@ def expect_none(text):
 
 # ---- exact phrases across every group ------------------------------------
 
-expect("focus left", "focus.move", "hyprctl dispatch movefocus l")
-expect("focus right", "focus.move", "hyprctl dispatch movefocus r")
-expect("go up", "focus.move", "hyprctl dispatch movefocus u")
-expect("move window down", "window.move", "hyprctl dispatch movewindow d")
-expect("close window", "window.close", "hyprctl dispatch killactive")
+DSP = "hyprctl dispatch "
+expect("focus left", "focus.move", DSP + '\'hl.dsp.focus({ direction = "l" })\'')
+expect("focus right", "focus.move", DSP + '\'hl.dsp.focus({ direction = "r" })\'')
+expect("go up", "focus.move", DSP + '\'hl.dsp.focus({ direction = "u" })\'')
+expect("move window down", "window.move", DSP + '\'hl.dsp.window.swap({ direction = "d" })\'')
+expect("close window", "window.close", DSP + "'hl.dsp.window.close()'")
 expect("full screen", "window.fullscreen")
 expect("float this", "window.float")
 expect("center this", "window.center")
 expect("pin it", "window.pin")
-expect("workspace 3", "workspace.go", "hyprctl dispatch workspace 3")
-expect("workspace three", "workspace.go", "hyprctl dispatch workspace 3")
-expect("go to workspace 9", "workspace.go", "hyprctl dispatch workspace 9")
+expect("workspace 3", "workspace.go", DSP + '\'hl.dsp.focus({ workspace = "3" })\'')
+expect("workspace three", "workspace.go", DSP + '\'hl.dsp.focus({ workspace = "3" })\'')
+expect("go to workspace 9", "workspace.go", DSP + '\'hl.dsp.focus({ workspace = "9" })\'')
 expect("next workspace", "workspace.next")
 expect("previous workspace", "workspace.prev")
-expect("throw this to 5", "workspace.throw", "hyprctl dispatch movetoworkspace 5")
+expect("throw this to 5", "workspace.throw", DSP + '\'hl.dsp.window.move({ workspace = "5" })\'')
 expect("open the browser", "app.launch", "omarchy launch browser")
 expect("launch terminal", "app.launch", "omarchy launch terminal")
 expect("show clipboard", "clipboard.open")
@@ -88,14 +89,37 @@ expect("night light", "nightlight.toggle")
 expect("do not disturb", "dnd.toggle")
 expect("take a screenshot", "capture.region")
 expect("lock the screen", "session.lock", "omarchy system lock")
+
+# ---- phrasings real speech produced that v1 did not cover ------------------
+# Every one of these came out of the history file after the first evening of
+# using it, transcribed exactly as whisper heard them.
+
+expect("move this window to workspace 4", "workspace.throw",
+       DSP + '\'hl.dsp.window.move({ workspace = "4" })\'')
+expect("move this window to 4", "workspace.throw")
+expect("send this window to workspace 2", "workspace.throw")
+expect("move it to workspace 7", "workspace.throw")
+expect("focus bottom", "focus.move", DSP + '\'hl.dsp.focus({ direction = "d" })\'')
+expect("focus top", "focus.move", DSP + '\'hl.dsp.focus({ direction = "u" })\'')
+expect("take me to workspace 5", "workspace.go")
+expect("go back", "workspace.former")
+expect("make this full screen", "window.fullscreen")
+
+# Every Hyprland command must use the Lua dispatcher API. The bare form
+# (`hyprctl dispatch workspace 3`) is accepted by the CLI, rejected by the
+# compositor, and looked like success for a whole evening.
+for cmd in GRAMMAR["commands"]:
+    run = cmd.get("run", "")
+    if run.startswith("hyprctl dispatch "):
+        check(f"{cmd['id']} uses hl.dsp", "hl.dsp" in run, run)
 expect("reboot", "session.reboot")
 
 # ---- homophones whisper genuinely produces -------------------------------
 
-expect("workspace to", "workspace.go", "hyprctl dispatch workspace 2")
-expect("workspace for", "workspace.go", "hyprctl dispatch workspace 4")
-expect("workspace ate", "workspace.go", "hyprctl dispatch workspace 8")
-expect("workspace won", "workspace.go", "hyprctl dispatch workspace 1")
+expect("workspace to", "workspace.go", DSP + '\'hl.dsp.focus({ workspace = "2" })\'')
+expect("workspace for", "workspace.go", DSP + '\'hl.dsp.focus({ workspace = "4" })\'')
+expect("workspace ate", "workspace.go", DSP + '\'hl.dsp.focus({ workspace = "8" })\'')
+expect("workspace won", "workspace.go", DSP + '\'hl.dsp.focus({ workspace = "1" })\'')
 
 # ---- transcription noise: punctuation, case, fillers, wake words ----------
 

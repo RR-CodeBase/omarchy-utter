@@ -45,6 +45,10 @@ PID_FILE = RUNTIME_DIR / "record.pid"
 WAV_FILE = RUNTIME_DIR / "record.wav"
 PENDING_FILE = RUNTIME_DIR / "pending.json"
 RECORD_LOG = RUNTIME_DIR / "record.log"
+EXEC_LOG = RUNTIME_DIR / "exec.log"
+
+# How long to wait for a command to fail before assuming it is long-running.
+EXEC_GRACE = 0.6
 
 HISTORY_LIMIT = 200
 CONFIRM_WINDOW = 8.0
@@ -128,8 +132,34 @@ def ensure_config() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     if not COMMANDS_FILE.exists() and DEFAULT_COMMANDS.exists():
         shutil.copy(DEFAULT_COMMANDS, COMMANDS_FILE)
+    else:
+        migrate_grammar()
     if not SETTINGS_FILE.exists():
         save_settings(dict(DEFAULT_SETTINGS))
+
+
+def migrate_grammar() -> str | None:
+    """Replace a grammar written against an older schema, keeping a backup.
+
+    The v1 grammar drove Hyprland through `hyprctl dispatch workspace 3`,
+    which this Hyprland rejects: it takes Lua dispatchers now. Leaving that
+    in place means commands that match, report success, and do nothing. The
+    old file is kept beside the new one so nothing a person wrote is lost.
+    """
+    if not DEFAULT_COMMANDS.exists():
+        return None
+    shipped = load_json(DEFAULT_COMMANDS, {}) or {}
+    current = load_json(COMMANDS_FILE, {}) or {}
+    have, want = int(current.get("version", 1)), int(shipped.get("version", 1))
+    if have >= want:
+        return None
+    backup = COMMANDS_FILE.with_suffix(f".v{have}.json")
+    try:
+        shutil.copy(COMMANDS_FILE, backup)
+        shutil.copy(DEFAULT_COMMANDS, COMMANDS_FILE)
+    except OSError:
+        return None
+    return str(backup)
 
 
 def grammar() -> dict:
@@ -615,20 +645,50 @@ def execute(match: Match, dry: bool = False) -> tuple[bool, str]:
         arm_confirm(cmd.get("id", ""))
         return False, "confirm"
     clear_confirm()
+    # Wait briefly and check. Fire-and-forget reported every command as a
+    # success, including `hyprctl dispatch` lines this Hyprland rejects
+    # outright -- the OSD said "Workspace 3" while nothing happened. Anything
+    # still running after the grace period has genuinely launched (a menu, an
+    # editor), so only a fast non-zero exit counts as a failure.
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        errlog = open(EXEC_LOG, "w+b")
+    except OSError:
+        errlog = subprocess.DEVNULL
     try:
         if cmd.get("shell"):
-            subprocess.Popen(
-                rendered, shell=True, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, start_new_session=True,
+            proc = subprocess.Popen(
+                rendered, shell=True, stdout=errlog,
+                stderr=errlog, start_new_session=True,
             )
         else:
-            subprocess.Popen(
-                shlex.split(rendered), stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, start_new_session=True,
+            proc = subprocess.Popen(
+                shlex.split(rendered), stdout=errlog,
+                stderr=errlog, start_new_session=True,
             )
     except Exception as exc:
         return False, str(exc)
-    return True, rendered
+    finally:
+        if errlog is not subprocess.DEVNULL:
+            errlog.close()
+
+    try:
+        code = proc.wait(timeout=EXEC_GRACE)
+    except subprocess.TimeoutExpired:
+        return True, rendered          # long-running: it started, that is enough
+    if code == 0:
+        return True, rendered
+    return False, exec_error(code)
+
+
+def exec_error(code: int) -> str:
+    """The first useful line of what the command complained about."""
+    try:
+        lines = [ln.strip() for ln in EXEC_LOG.read_text(errors="replace").splitlines()
+                 if ln.strip()]
+    except Exception:
+        lines = []
+    return (lines[0][:140] if lines else f"exited {code}")
 
 
 def interpret(raw: str, dry: bool = False, quiet: bool = False) -> int:
@@ -842,6 +902,10 @@ def cmd_doctor(args) -> int:
     check("Microphone source", bool(sources.strip()),
           f"{len(sources.strip().splitlines())} source(s)" if sources.strip() else "no PulseAudio/PipeWire sources")
 
+    migrated = migrate_grammar()
+    if migrated:
+        print(f"[NOTE] Grammar upgraded to v{json.loads(DEFAULT_COMMANDS.read_text())['version']};"
+              f" your previous file is at {migrated}")
     g = grammar()
     cmds = g.get("commands", [])
     ids = [c.get("id") for c in cmds]
@@ -867,6 +931,25 @@ def cmd_doctor(args) -> int:
         if head and not shutil.which(head[0]):
             unresolved.append(f"{c.get('id')} -> {head[0]}")
     check("Commands on PATH", not unresolved, ", ".join(unresolved) if unresolved else "")
+
+    # This Hyprland takes Lua dispatchers (hl.dsp.…); the older
+    # `hyprctl dispatch workspace 3` form is accepted by the CLI, fails in the
+    # compositor, and used to look like success. Prove the calling convention
+    # against the running compositor rather than assuming it.
+    if shutil.which("hyprctl"):
+        probe = subprocess.run(["hyprctl", "dispatch", "hl.dsp.no_op()"],
+                               capture_output=True, text=True, timeout=10)
+        good = probe.returncode == 0 and "ok" in (probe.stdout or "").lower()
+        check("Hyprland dispatchers", good,
+              "" if good else (probe.stdout or probe.stderr or "").strip().splitlines()[:1])
+
+    legacy = []
+    for c in cmds:
+        run = c.get("run", "")
+        if run.startswith("hyprctl dispatch ") and "hl.dsp" not in run:
+            legacy.append(c.get("id"))
+    check("No legacy dispatch syntax", not legacy,
+          ", ".join(legacy) if legacy else "")
 
     hypr = HOME / ".config/hypr"
     bound = False
