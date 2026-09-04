@@ -23,41 +23,54 @@ sentence can't end up in your code.
 
 ## Install
 
-Voice commands need Voxtype, which Omarchy installs for you:
-
-```bash
-omarchy voxtype install     # once, if you haven't already
+```sh
+omarchy plugin add https://github.com/RR-CodeBase/omarchy-utter.git --enable
 ```
 
-Then:
+Two things the plugin cannot do for you, both one command:
 
-```bash
-git clone https://github.com/RR-CodeBase/omarchy-utter
-cd omarchy-utter
-./install.sh
+```sh
+omarchy voxtype install                                              # local transcription
+~/.config/omarchy/plugins/io.github.rr-codebase.utter/install.sh     # the F10 binding
 ```
 
-That registers the plugin, places the bar widget, and adds the keybindings.
-Re-running it is safe. `./install.sh --uninstall` takes it all back out.
+`install.sh` is safe to re-run and only ever touches its own managed block in
+`~/.config/hypr/bindings.lua`. Working from a clone instead? `git clone`, then
+`./install.sh` — it registers the plugin, places the widget and adds the
+binding in one go.
 
-## Using it
+## Usage
 
-| | |
-|---|---|
-| **Hold `F10`** | record; release to run |
-| **Click the bar icon** | how to use it, status, recent utterances, on/off |
-| **Middle-click the icon** | turn voice commands on or off |
+Hold **F10**, say what you want, release. Click the bar icon for the current
+state, what was heard last, and an on/off switch; Escape closes the panel.
+Middle-click the icon to turn voice commands off without opening anything.
 
-Push-to-talk only, deliberately. A toggle needs a second free chord and the
-obvious ones are taken — `SUPER + CTRL + V` is Omarchy's clipboard manager. If
-you want one, bind `utter listen` to a chord you know is free.
+```sh
+utter commands       # everything it understands
+utter doctor         # check the install
+utter say "focus left"   # try a command without speaking
+```
 
-The popup names the key Hyprland is actually bound to, read back from the
-compositor rather than from the installer, so rebinding `F10` to something else
-updates the instruction too.
+## Configure
 
-The bar icon shows what is happening: `󰗋` ready, `󰍬` listening, `󰔟` thinking,
-`󰘥` didn't catch that, `󰍭` off.
+```sh
+omarchy bar move io.github.rr-codebase.utter --section right
+```
+
+The grammar is a JSON file you own at `~/.config/omarchy/utter/commands.json`,
+and settings live beside it. Both are covered below.
+
+## Remove
+
+```sh
+~/.config/omarchy/plugins/io.github.rr-codebase.utter/install.sh --uninstall
+```
+
+That removes the keybinding block and the plugin. `omarchy plugin remove
+io.github.rr-codebase.utter` on its own removes the plugin but leaves the
+binding behind. Your grammar and history stay in `~/.config/omarchy/utter/`
+and `~/.local/state/omarchy/` either way; delete those directories to go back
+to nothing.
 
 ## What you can say
 
@@ -232,7 +245,9 @@ command palette that shares the grammar.
 ## Tests
 
 ```bash
-python3 tests/test_grammar.py
+python3 tests/test_grammar.py     # the matcher and the grammar
+python3 tests/test_pipeline.py    # real audio through whisper to a process
+python3 tests/test_plugin.py      # conformance with the Omarchy plugin guide
 ```
 
 215 assertions covering slot canonicalization, homophones, transcription noise,

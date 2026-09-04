@@ -8,7 +8,7 @@ import qs.Ui
 // panels: one BarIconButton for the bar, a KeyboardPanel anchored to it.
 //
 // The widget is a window onto the CLI, never a second source of truth. Every
-// piece of state is read from the files `utter` writes, so the panel, the
+// piece of root.phase is read from the files `utter` writes, so the panel, the
 // keybinding and anything you run in a terminal always agree. Actions go
 // through the bundled CLI by absolute path, so this works whether or not
 // `utter` is on PATH.
@@ -31,8 +31,8 @@ Panel {
   readonly property string cli:
     Qt.resolvedUrl("bin/utter").toString().replace(/^file:\/\//, "")
 
-  property bool enabled: true
-  property string state: "idle"      // idle listening thinking ok unheard confirm error
+  property bool voiceEnabled: true
+  property string phase: "idle"   // idle listening thinking ok unheard confirm error
   property string heard: ""
   property string action: ""
   property string lastError: ""
@@ -42,24 +42,24 @@ Panel {
   property var examples: []
   property int commandCount: 0
 
-  readonly property bool busy: state === "listening" || state === "thinking"
+  readonly property bool busy: root.phase === "listening" || root.phase === "thinking"
 
   readonly property string glyph: {
-    if (!enabled) return "󰍭"
-    if (state === "listening") return "󰍬"
-    if (state === "thinking") return "󰔟"
-    if (state === "unheard" || state === "confirm") return "󰘥"
+    if (!root.voiceEnabled) return "󰍭"
+    if (root.phase === "listening") return "󰍬"
+    if (root.phase === "thinking") return "󰔟"
+    if (root.phase === "unheard" || root.phase === "confirm") return "󰘥"
     return "󰗋"
   }
 
   readonly property string statusLine: {
-    if (!enabled) return "Voice commands off"
-    if (state === "listening") return "Listening…"
-    if (state === "thinking") return "Thinking…"
-    if (state === "confirm") return "Say it again to confirm"
-    if (state === "unheard") return "Didn't catch that"
-    if (state === "error") return lastError !== "" ? lastError : "Something went wrong"
-    if (state === "ok" && action !== "") return action
+    if (!root.voiceEnabled) return "Voice commands off"
+    if (root.phase === "listening") return "Listening…"
+    if (root.phase === "thinking") return "Thinking…"
+    if (root.phase === "confirm") return "Say it again to confirm"
+    if (root.phase === "unheard") return "Didn't catch that"
+    if (root.phase === "error") return lastError !== "" ? lastError : "Something went wrong"
+    if (root.phase === "ok" && action !== "") return action
     return "Ready"
   }
 
@@ -71,7 +71,7 @@ Panel {
     if (root.bar) root.bar.run(cmd)
   }
 
-  // ---- state written by the CLI -------------------------------------------
+  // ---- root.phase written by the CLI -------------------------------------------
 
   FileView {
     id: stateFile
@@ -81,8 +81,8 @@ Panel {
     onLoaded: {
       try {
         var s = JSON.parse(text() || "{}") || {}
-        root.enabled = s.enabled !== false
-        root.state = typeof s.state === "string" ? s.state : "idle"
+        root.voiceEnabled = s.enabled !== false
+        root.phase = typeof s.state === "string" ? s.state : "idle"
         root.heard = typeof s.heard === "string" ? s.heard : ""
         root.action = typeof s.action === "string" ? s.action : ""
         root.lastError = typeof s.error === "string" ? s.error : ""
@@ -90,7 +90,7 @@ Panel {
         root.score = isFinite(sc) ? sc : 0
         if (typeof s.pttKey === "string" && s.pttKey !== "") root.pttKey = s.pttKey
       } catch (error) {
-        // A half-written file is transient; keep the last good state.
+        // A half-written file is transient; keep the last good root.phase.
       }
     }
     onFileChanged: reload()
@@ -157,10 +157,10 @@ Panel {
     anchors.fill: parent
     bar: root.bar
     text: root.glyph
-    active: root.enabled && (root.busy || root.state === "ok")
-    activeColor: root.state === "listening" ? Color.accent : Color.popups.text
+    active: root.voiceEnabled && (root.busy || root.phase === "ok")
+    activeColor: root.phase === "listening" ? Color.accent : Color.popups.text
     tooltipText: root.statusLine
-      + (root.enabled && root.pttKey !== "" ? "\nHold " + root.pttKey + " and speak" : "")
+      + (root.voiceEnabled && root.pttKey !== "" ? "\nHold " + root.pttKey + " and speak" : "")
       + "\nClick for voice commands"
     opacity: pulse.running ? pulseOpacity : 1.0
 
@@ -216,7 +216,7 @@ Panel {
         // How to use it, named after the key Hyprland is really bound to
         // rather than the one the installer wrote, so a rebind follows.
         Row {
-          visible: root.enabled && root.pttKey !== ""
+          visible: root.voiceEnabled && root.pttKey !== ""
           width: panelColumn.width
           spacing: Style.space(8)
 
@@ -279,10 +279,10 @@ Panel {
 
           Text {
             id: enableIcon
-            text: root.enabled ? "󰗋" : "󰍭"
+            text: root.voiceEnabled ? "󰗋" : "󰍭"
             textFormat: Text.PlainText
-            color: root.enabled ? Color.accent : root.panelText
-            opacity: root.enabled ? 1.0 : 0.7
+            color: root.voiceEnabled ? Color.accent : root.panelText
+            opacity: root.voiceEnabled ? 1.0 : 0.7
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.icon
             anchors.left: parent.left
@@ -301,7 +301,7 @@ Panel {
           }
 
           ToggleSwitch {
-            checked: root.enabled
+            checked: root.voiceEnabled
             foreground: root.panelText
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
