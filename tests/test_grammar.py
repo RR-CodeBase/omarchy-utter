@@ -258,6 +258,65 @@ for spoken in ["spotify", "slack", "gimp", "photoshop", "zzzz", ""]:
 
 check("desktop_apps reads this machine", len(utter.desktop_apps()) > 0)
 
+# ---- focusing an app that is already open ----------------------------------
+# "focus teams" must reach the app, while "focus left" must stay a direction.
+# Both templates are "focus " plus one slot, so the tie is broken by preferring
+# an enumerated slot over one that matches anything.
+
+for phrase, expected in [
+    ("focus left", "focus.move"),
+    ("focus right", "focus.move"),
+    ("focus up", "focus.move"),
+    ("focus on left", "focus.move"),
+    ("focus on the down", "focus.move"),
+    ("focus teams", "app.launch"),
+    ("focus on teams", "app.launch"),
+    ("focus on obsidian", "app.launch"),
+    ("go to brave", "app.launch"),
+    ("show me files", "app.launch"),
+]:
+    hit = match(phrase)
+    check(f"{phrase!r} -> {expected}", hit is not None and hit.cmd["id"] == expected,
+          hit.cmd["id"] if hit else "no match")
+
+# find_window against a fixed client list, so this does not depend on what
+# happens to be open.
+CLIENTS = [
+    {"address": "0x1", "class": "brave-teams.microsoft.com__-Default",
+     "initialClass": "brave-teams.microsoft.com__-Default", "title": "Calendar | Microsoft Teams"},
+    {"address": "0x2", "class": "org.gnome.Nautilus", "initialClass": "org.gnome.Nautilus",
+     "title": "Home"},
+    {"address": "0x3", "class": "com.mitchellh.ghostty", "initialClass": "com.mitchellh.ghostty",
+     "title": "~/Projects"},
+    {"address": "0x4", "class": "brave-browser", "initialClass": "brave-browser",
+     "title": "GitHub"},
+]
+TEAMS = {"id": "Teams.desktop", "name": "Teams", "binary": "omarchy-launch-webapp",
+         "wmclass": "", "keywords": "", "generic": ""}
+NAUTILUS = {"id": "org.gnome.Nautilus.desktop", "name": "Files", "binary": "nautilus",
+            "wmclass": "", "keywords": "", "generic": ""}
+GHOSTTY = {"id": "com.mitchellh.ghostty.desktop", "name": "Ghostty", "binary": "ghostty",
+           "wmclass": "com.mitchellh.ghostty", "keywords": "", "generic": ""}
+PINTA = {"id": "pinta.desktop", "name": "Pinta", "binary": "pinta", "wmclass": "Pinta",
+         "keywords": "", "generic": ""}
+
+check("web app found by name in its class",
+      utter.find_window(TEAMS, CLIENTS) == "0x1", str(utter.find_window(TEAMS, CLIENTS)))
+check("app found by binary in a reverse-dns class",
+      utter.find_window(NAUTILUS, CLIENTS) == "0x2", str(utter.find_window(NAUTILUS, CLIENTS)))
+check("app found by its declared window class",
+      utter.find_window(GHOSTTY, CLIENTS) == "0x3", str(utter.find_window(GHOSTTY, CLIENTS)))
+check("app that is not running is not found",
+      utter.find_window(PINTA, CLIENTS) is None, str(utter.find_window(PINTA, CLIENTS)))
+check("no windows at all is not a crash", utter.find_window(GHOSTTY, []) is None)
+
+# The launcher binary must never be used as a window pattern: Teams' Exec is
+# `omarchy-launch-webapp …`, and matching on that found nothing, so Utter
+# reported "Focus Teams" and started a second copy instead.
+check("launcher binaries are not window patterns",
+      "omarchy-launch-webapp" in utter.GENERIC_BINARIES)
+check("gtk-launch is not a window pattern", "gtk-launch" in utter.GENERIC_BINARIES)
+
 # ---- destructive commands are gated --------------------------------------
 
 for cid in ["session.reboot", "session.shutdown", "session.sleep"]:

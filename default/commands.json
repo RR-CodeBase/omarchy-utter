@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "wakeWords": [
     "omarchy",
     "computer",
@@ -85,7 +85,9 @@
         "focus {dir}",
         "go {dir}",
         "move focus {dir}",
-        "focus the {dir} window"
+        "focus the {dir} window",
+        "focus on {dir}",
+        "focus on the {dir}"
       ],
       "run": "hyprctl dispatch 'hl.dsp.focus({ direction = \"{dir}\" })'",
       "label": "Focus {dir}"
@@ -256,7 +258,12 @@
         "start {appname}",
         "open up {appname}",
         "bring up {appname}",
-        "switch to {appname}"
+        "switch to {appname}",
+        "focus {appname}",
+        "focus on {appname}",
+        "go to {appname}",
+        "show me {appname}",
+        "bring me {appname}"
       ],
       "label": "Open {appname}",
       "internal": "launch",

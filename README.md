@@ -74,7 +74,7 @@ display, focus modes, capture and session. A few of them:
 | "workspace three" | `hl.dsp.focus({ workspace = "3" })` |
 | "throw this to two" | `hl.dsp.window.move({ workspace = "2" })` |
 | "close window" | `hl.dsp.window.close()` |
-| "open teams" / "open one password" | resolved against your installed apps |
+| "open teams" / "focus on teams" | focuses it if open, launches it if not |
 | "take a screenshot" | `omarchy capture screenshot region` |
 | "do not disturb" | `omarchy toggle notification silencing` |
 | "lock the screen" | `omarchy system lock` |
@@ -113,14 +113,37 @@ A slot maps what you *say* to what gets *run*: `"l": ["left"]` means saying
 "left" substitutes `l`. Only the canonical value ever reaches the command line,
 so what you say can never inject arguments.
 
-### Opening apps
+### Opening and focusing apps
 
-"open *anything*" is resolved against the apps actually installed on your
+"open *anything*", and equally "focus on *anything*", is resolved against the apps actually installed on your
 machine — the `.desktop` entries a menu would show you — matching on the app's
 name, its binary, its window class and its file id, and tolerating how speech
 comes out ("one password" finds 1Password, "x journal" finds Xournal++). If
 nothing matches well enough you get *"no app called …"* rather than the nearest
 alphabetical guess, because opening the wrong app is worse than opening none.
+
+If the app already has a window open, Utter focuses it rather than starting a
+second copy, and says which it did — *"Focus Teams"* against *"Open Teams"*.
+The window is found by address from `hyprctl clients`, matched on the app's
+declared window class, its binary and its name, because handing a pattern to a
+launcher gets web apps wrong: Teams' `Exec` is `omarchy-launch-webapp …`, and
+matching windows against *that* finds nothing and opens a duplicate.
+
+"focus left" stays a direction and "focus teams" becomes an app: where both
+could match, a known value beats a wildcard. And a near miss on a known
+command beats a wildcard too, so "focus lefd" is still corrected to *left*
+rather than being taken as an app nobody has.
+
+Phrases that name a *role* rather than an app — "browser", "terminal",
+"editor" — go through Omarchy's configured default, so they open yours. That
+table lives in the grammar under `appAliases` and is yours to extend:
+
+```json
+"appAliases": {
+  "my notes": { "app": "obsidian" },
+  "the shell": { "run": "omarchy launch terminal", "label": "terminal" }
+}
+```
 
 This is the one place free speech enters the system, so it is fenced: a free
 slot (`{appname}`) may only be used by a command with an `internal` handler,
