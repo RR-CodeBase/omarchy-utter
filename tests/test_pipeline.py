@@ -70,8 +70,11 @@ proof = tmp / "proof"
 
 # A grammar whose phrases are words the JFK sample really contains, so a real
 # recording can drive the real matcher.
+import json as _json
+SHIPPED_VERSION = _json.loads((ROOT / "default" / "commands.json").read_text())["version"]
+
 scratch = {
-    "version": 1,
+    "version": SHIPPED_VERSION,
     "wakeWords": [],
     "slots": {"who": {"country": ["country"], "americans": ["americans"]}},
     "commands": [
