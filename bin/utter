@@ -557,6 +557,50 @@ def launch_app(spoken: str) -> tuple[bool, str]:
     return True, app["name"]
 
 
+# ---------------------------------------------------------------- keybinding
+
+# Hyprland reports the modifiers as a bitmask.
+MODMASK = [(64, "SUPER"), (8, "ALT"), (4, "CTRL"), (1, "SHIFT")]
+PTT_DESCRIPTION = "Voice command (push-to-talk)"
+
+
+def detect_ptt_key() -> str:
+    """Whatever key is actually bound right now, so the panel cannot lie.
+
+    Read from Hyprland rather than from our own config: if someone rebinds it
+    by hand, the instruction in the popup should follow them.
+    """
+    try:
+        out = subprocess.run(["hyprctl", "binds", "-j"],
+                             capture_output=True, text=True, timeout=5).stdout
+        binds = json.loads(out or "[]")
+    except Exception:
+        return ""
+    for bind in binds:
+        if (bind.get("description") or "") != PTT_DESCRIPTION or bind.get("release"):
+            continue
+        mask = int(bind.get("modmask") or 0)
+        parts = [name for bit, name in MODMASK if mask & bit]
+        key = bind.get("key") or ""
+        if not key:
+            continue
+        return " + ".join(parts + [key])
+    return ""
+
+
+def ptt_key(refresh: bool = False) -> str:
+    """Cached in the state file: detecting costs a subprocess, and the
+    push-to-talk path is the one place latency is felt."""
+    state = load_json(STATE_FILE, {}) or {}
+    cached = state.get("pttKey")
+    if cached and not refresh:
+        return cached
+    found = detect_ptt_key()
+    if found and found != cached:
+        set_state(pttKey=found)
+    return found or cached or ""
+
+
 # ---------------------------------------------------------------- feedback
 
 def set_state(**kw) -> None:
@@ -1062,6 +1106,7 @@ def cmd_commands(args) -> int:
 
 
 def cmd_status(args) -> int:
+    ptt_key(refresh=True)
     state = load_json(STATE_FILE, {}) or {}
     s = settings()
     state.setdefault("state", "idle")
@@ -1097,7 +1142,7 @@ def cmd_toggle(args) -> int:
     else:
         s["enabled"] = args.mode == "enable"
     save_settings(s)
-    set_state(state="idle")
+    set_state(state="idle", pttKey=detect_ptt_key() or ptt_key())
     osd("Voice commands on" if s["enabled"] else "Voice commands off", "microphone")
     print("enabled" if s["enabled"] else "disabled")
     return 0
@@ -1213,7 +1258,9 @@ def cmd_doctor(args) -> int:
                         break
                 except Exception:
                     continue
-    check("Hyprland keybinding", bound, "" if bound else "run: ./install.sh, or add hypr/utter.conf yourself")
+    key = detect_ptt_key()
+    check("Hyprland keybinding", bound or bool(key),
+          f"hold {key}" if key else "run: ./install.sh to add it")
 
     print()
     print("Ready." if ok else "Some checks failed - see above.")

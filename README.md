@@ -45,9 +45,16 @@ Re-running it is safe. `./install.sh --uninstall` takes it all back out.
 | | |
 |---|---|
 | **Hold `F10`** | record; release to run |
-| **`SUPER + CTRL + V`** | toggle recording instead of holding |
-| **Click the bar icon** | status, recent utterances, on/off |
+| **Click the bar icon** | how to use it, status, recent utterances, on/off |
 | **Middle-click the icon** | turn voice commands on or off |
+
+Push-to-talk only, deliberately. A toggle needs a second free chord and the
+obvious ones are taken — `SUPER + CTRL + V` is Omarchy's clipboard manager. If
+you want one, bind `utter listen` to a chord you know is free.
+
+The popup names the key Hyprland is actually bound to, read back from the
+compositor rather than from the installer, so rebinding `F10` to something else
+updates the instruction too.
 
 The bar icon shows what is happening: `󰗋` ready, `󰍬` listening, `󰔟` thinking,
 `󰘥` didn't catch that, `󰍭` off.

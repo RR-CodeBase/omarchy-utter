@@ -37,6 +37,7 @@ Panel {
   property string action: ""
   property string lastError: ""
   property real score: 0
+  property string pttKey: ""
   property var recent: []
   property var examples: []
   property int commandCount: 0
@@ -87,6 +88,7 @@ Panel {
         root.lastError = typeof s.error === "string" ? s.error : ""
         var sc = Number(s.score)
         root.score = isFinite(sc) ? sc : 0
+        if (typeof s.pttKey === "string" && s.pttKey !== "") root.pttKey = s.pttKey
       } catch (error) {
         // A half-written file is transient; keep the last good state.
       }
@@ -157,7 +159,9 @@ Panel {
     text: root.glyph
     active: root.enabled && (root.busy || root.state === "ok")
     activeColor: root.state === "listening" ? Color.accent : Color.popups.text
-    tooltipText: root.statusLine + "\nClick for voice commands"
+    tooltipText: root.statusLine
+      + (root.enabled && root.pttKey !== "" ? "\nHold " + root.pttKey + " and speak" : "")
+      + "\nClick for voice commands"
     opacity: pulse.running ? pulseOpacity : 1.0
 
     property real pulseOpacity: 1.0
@@ -207,6 +211,46 @@ Panel {
           text: root.statusLine
           foreground: root.panelText
           fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+        }
+
+        // How to use it, named after the key Hyprland is really bound to
+        // rather than the one the installer wrote, so a rebind follows.
+        Row {
+          visible: root.enabled && root.pttKey !== ""
+          width: panelColumn.width
+          spacing: Style.space(8)
+
+          Rectangle {
+            anchors.verticalCenter: parent.verticalCenter
+            radius: Style.space(3)
+            color: "transparent"
+            border.width: Math.max(1, Style.space(1))
+            border.color: root.panelText
+            opacity: 0.85
+            implicitWidth: keyLabel.implicitWidth + Style.space(12)
+            implicitHeight: keyLabel.implicitHeight + Style.space(5)
+
+            Text {
+              id: keyLabel
+              anchors.centerIn: parent
+              text: root.pttKey
+              textFormat: Text.PlainText
+              color: root.panelText
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.bodySmall
+              font.bold: true
+            }
+          }
+
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.busy ? "keep holding, then release" : "hold and speak"
+            textFormat: Text.PlainText
+            color: root.panelText
+            opacity: 0.75
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.bodySmall
+          }
         }
 
         // What was actually heard, verbatim. When a command misfires this is

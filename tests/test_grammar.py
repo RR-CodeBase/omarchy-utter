@@ -317,6 +317,24 @@ hit = match("focus left")
 check("word slot labels as a word", hit and hit.label == "Focus left",
       hit.label if hit else "")
 
+# ---- the push-to-talk key shown in the popup -------------------------------
+# Parsed out of `hyprctl binds -j` so the instruction follows a rebind. The
+# modifier bitmask is the part worth pinning down.
+
+check("modmask table is the Hyprland one",
+      dict((n, b) for b, n in utter.MODMASK) == {"SUPER": 64, "ALT": 8, "CTRL": 4, "SHIFT": 1},
+      str(utter.MODMASK))
+check("push-to-talk description matches the binding we ship",
+      utter.PTT_DESCRIPTION in (ROOT / "hypr" / "utter.lua").read_text())
+
+LUA = (ROOT / "hypr" / "utter.lua").read_text()
+check("exactly two bindings ship", LUA.count("o.bind(") == 2, str(LUA.count("o.bind(")))
+check("press and release are both bound",
+      "ptt start" in LUA and "ptt stop" in LUA and "release = true" in LUA)
+check("no toggle binding ships", "utter listen" not in LUA.replace("`utter listen`", ""))
+check("SUPER + CTRL + V is not claimed", "SUPER + CTRL + V" not in LUA.split("--", 1)[0]
+      or "clipboard" in LUA.lower())
+
 # ---- transcript parsing ---------------------------------------------------
 # Voxtype puts progress lines on stdout next to the transcript. These are
 # verbatim captures from voxtype 0.7.5. The empty-transcript case is the
