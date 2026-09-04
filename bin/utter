@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import hashlib
 import itertools
 import json
 import os
@@ -51,6 +52,10 @@ EXEC_LOG = RUNTIME_DIR / "exec.log"
 EXEC_GRACE = 0.6
 
 HISTORY_LIMIT = 200
+
+# Records which shipped grammar a config came from, so an upgrade can tell an
+# untouched file from one its owner has worked on.
+SHIPPED_MARKER = "_shippedFrom"
 CONFIRM_WINDOW = 8.0
 
 DEFAULT_SETTINGS = {
@@ -133,10 +138,30 @@ def save_settings(s: dict) -> None:
     atomic_write(SETTINGS_FILE, json.dumps(s, indent=2) + "\n")
 
 
+def grammar_fingerprint(data: dict) -> str:
+    """A hash of the grammar as Utter would write it, ignoring the marker it
+    adds. Comparing this against the file later says whether anyone edited it."""
+    stripped = {k: v for k, v in data.items() if k != SHIPPED_MARKER}
+    rendered = json.dumps(stripped, indent=2, sort_keys=True) + "\n"
+    return hashlib.sha256(rendered.encode()).hexdigest()[:16]
+
+
+def install_default_grammar() -> None:
+    """Copy the shipped grammar and record its fingerprint, so a later upgrade
+    can tell an untouched file from one someone has worked on."""
+    try:
+        data = json.loads(DEFAULT_COMMANDS.read_text())
+    except Exception:
+        shutil.copy(DEFAULT_COMMANDS, COMMANDS_FILE)
+        return
+    data[SHIPPED_MARKER] = grammar_fingerprint(data)
+    atomic_write(COMMANDS_FILE, json.dumps(data, indent=2) + "\n")
+
+
 def ensure_config() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     if not COMMANDS_FILE.exists() and DEFAULT_COMMANDS.exists():
-        shutil.copy(DEFAULT_COMMANDS, COMMANDS_FILE)
+        install_default_grammar()
     else:
         migrate_grammar()
     if not SETTINGS_FILE.exists():
@@ -144,12 +169,15 @@ def ensure_config() -> None:
 
 
 def migrate_grammar() -> str | None:
-    """Replace a grammar written against an older schema, keeping a backup.
+    """Bring an out-of-date grammar forward, but never over someone's edits.
 
-    The v1 grammar drove Hyprland through `hyprctl dispatch workspace 3`,
-    which this Hyprland rejects: it takes Lua dispatchers now. Leaving that
-    in place means commands that match, report success, and do nothing. The
-    old file is kept beside the new one so nothing a person wrote is lost.
+    A grammar written against an older schema can be silently broken: the v1
+    one drove Hyprland with `hyprctl dispatch workspace 3`, which this
+    Hyprland rejects, so its commands matched, reported success and did
+    nothing. Replacing it is the right fix -- but only for a file nobody has
+    touched. Utter records which shipped grammar it installed; if the file
+    still matches that, it is ours to replace. If it does not, the new one is
+    written alongside as `commands.new.json` and left for the owner to merge.
     """
     if not DEFAULT_COMMANDS.exists():
         return None
@@ -157,14 +185,38 @@ def migrate_grammar() -> str | None:
     current = load_json(COMMANDS_FILE, {}) or {}
     have, want = int(current.get("version", 1)), int(shipped.get("version", 1))
     if have >= want:
+        # Same version, no marker: this file predates the marker but is
+        # provably what we ship, so stamp it and let future upgrades be
+        # automatic. Anything that differs is left alone, unstamped.
+        if have == want and not current.get(SHIPPED_MARKER):
+            shipped_body = {k: v for k, v in shipped.items() if k != SHIPPED_MARKER}
+            if {k: v for k, v in current.items() if k != SHIPPED_MARKER} == shipped_body:
+                install_default_grammar()
         return None
+
+    untouched = _matches_shipped(current)
+    if not untouched:
+        # Someone has edited this. Their file stays exactly as it is.
+        proposed = CONFIG_DIR / "commands.new.json"
+        try:
+            shutil.copy(DEFAULT_COMMANDS, proposed)
+        except OSError:
+            return None
+        return f"!{proposed}"
+
     backup = COMMANDS_FILE.with_suffix(f".v{have}.json")
     try:
         shutil.copy(COMMANDS_FILE, backup)
-        shutil.copy(DEFAULT_COMMANDS, COMMANDS_FILE)
+        install_default_grammar()
     except OSError:
         return None
     return str(backup)
+
+
+def _matches_shipped(current: dict) -> bool:
+    """Is this file still exactly what Utter installed?"""
+    recorded = current.get(SHIPPED_MARKER)
+    return bool(recorded) and grammar_fingerprint(current) == recorded
 
 
 def grammar() -> dict:
@@ -1282,7 +1334,10 @@ def cmd_doctor(args) -> int:
           f"{len(sources.strip().splitlines())} source(s)" if sources.strip() else "no PulseAudio/PipeWire sources")
 
     migrated = migrate_grammar()
-    if migrated:
+    if migrated and migrated.startswith("!"):
+        print(f"[NOTE] A newer grammar is available but yours has been edited,"
+              f" so it was left alone. The new one is at {migrated[1:]}")
+    elif migrated:
         print(f"[NOTE] Grammar upgraded to v{json.loads(DEFAULT_COMMANDS.read_text())['version']};"
               f" your previous file is at {migrated}")
     g = grammar()

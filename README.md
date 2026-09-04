@@ -161,10 +161,17 @@ After editing, `utter doctor` re-checks the whole file.
 
 ### When the shipped grammar changes
 
-The grammar carries a `version`. When Utter ships a newer one, your file is
-replaced and the old one kept beside it as `commands.v<n>.json`, so anything
-you wrote is recoverable. Copy your own commands across and they survive the
-next upgrade too.
+The grammar carries a `version`, and Utter records the fingerprint of the file
+it installed. When a newer grammar ships:
+
+- if your file is still exactly what Utter wrote, it is replaced and the old
+  one kept beside it as `commands.v<n>.json`;
+- **if you have edited it, it is left alone.** The new grammar is written
+  beside it as `commands.new.json` and `utter doctor` tells you it is there.
+
+An upgrade never walks over your edits, which matters because a stale grammar
+can be silently broken — the v1 one drove Hyprland with a syntax this Hyprland
+rejects, so its commands matched, reported success, and did nothing.
 
 ## How the matching works
 

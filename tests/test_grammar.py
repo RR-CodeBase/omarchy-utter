@@ -11,6 +11,7 @@ gated behind a confirm.
 
 import importlib.machinery
 import importlib.util
+import os
 import json
 import sys
 from pathlib import Path
@@ -393,6 +394,72 @@ check("press and release are both bound",
 check("no toggle binding ships", "utter listen" not in LUA.replace("`utter listen`", ""))
 check("SUPER + CTRL + V is not claimed", "SUPER + CTRL + V" not in LUA.split("--", 1)[0]
       or "clipboard" in LUA.lower())
+
+# ---- a grammar upgrade must not walk over someone's edits ------------------
+# The marketplace checklist says a plugin must not overwrite user
+# configuration without consent, and an edited grammar is exactly that.
+
+import shutil as _shutil
+import tempfile as _tempfile
+
+_tmp = Path(_tempfile.mkdtemp(prefix="utter-migrate-"))
+_old_config, _old_state = os.environ.get("XDG_CONFIG_HOME"), os.environ.get("XDG_STATE_HOME")
+os.environ["XDG_CONFIG_HOME"] = str(_tmp / "config")
+os.environ["XDG_STATE_HOME"] = str(_tmp / "state")
+_m = importlib.machinery.SourceFileLoader("utter_migrate", str(ROOT / "bin" / "utter"))
+_ms = importlib.util.spec_from_loader("utter_migrate", _m)
+um = importlib.util.module_from_spec(_ms)
+_m.exec_module(um)
+
+# A fresh install records which shipped grammar it laid down.
+um.ensure_config()
+fresh = json.loads(um.COMMANDS_FILE.read_text())
+check("a fresh grammar records its origin", bool(fresh.get("_shippedFrom")), str(fresh)[:80])
+check("a fresh grammar is the shipped version",
+      fresh.get("version") == GRAMMAR["version"], str(fresh.get("version")))
+
+# An untouched file from an older version is ours to upgrade. Build it the
+# way an older Utter would have: the old content, plus a marker recording
+# that same content, so the fingerprint still matches.
+old = {k: v for k, v in fresh.items() if k != um.SHIPPED_MARKER}
+old["version"] = fresh["version"] - 1
+old[um.SHIPPED_MARKER] = um.grammar_fingerprint(old)
+um.atomic_write(um.COMMANDS_FILE, json.dumps(old, indent=2) + "\n")
+check("a file we installed is recognised as unedited", um._matches_shipped(old))
+result = um.migrate_grammar()
+check("an unedited older grammar is replaced",
+      result is not None and not str(result).startswith("!"), str(result))
+check("...and the old one is kept", result and Path(result).exists())
+check("...and the new one is current",
+      json.loads(um.COMMANDS_FILE.read_text())["version"] == GRAMMAR["version"])
+
+# An edited file is left exactly alone. One added command is enough: the
+# fingerprint no longer matches what we wrote.
+mine = json.loads(um.COMMANDS_FILE.read_text())
+mine["version"] = mine["version"] - 1
+mine["commands"].append({"id": "mine.custom", "group": "Mine",
+                         "say": ["do my thing"], "run": "true", "label": "Mine"})
+check("an edited file is not recognised as ours", not um._matches_shipped(mine))
+edited = json.dumps(mine, indent=2) + "\n"
+um.COMMANDS_FILE.write_text(edited)
+result = um.migrate_grammar()
+check("an edited grammar is not replaced", str(result).startswith("!"), str(result))
+check("...the file is untouched byte for byte",
+      um.COMMANDS_FILE.read_text() == edited)
+check("...my command survives",
+      "mine.custom" in um.COMMANDS_FILE.read_text())
+check("...and the new grammar is offered alongside",
+      (um.CONFIG_DIR / "commands.new.json").exists())
+check("...where it is the current version",
+      json.loads((um.CONFIG_DIR / "commands.new.json").read_text())["version"]
+      == GRAMMAR["version"])
+
+_shutil.rmtree(_tmp, ignore_errors=True)
+for _k, _v in (("XDG_CONFIG_HOME", _old_config), ("XDG_STATE_HOME", _old_state)):
+    if _v is None:
+        os.environ.pop(_k, None)
+    else:
+        os.environ[_k] = _v
 
 # ---- transcript parsing ---------------------------------------------------
 # Voxtype puts progress lines on stdout next to the transcript. These are
