@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "io.github.rr-codebase.utter",
-  "name": "Utter",
+  "name": "Desktop Voice Control",
   "version": "0.1.0",
   "author": "Ruan Roos",
   "description": "Say it, and the window manager does it. Push-to-talk voice commands for Omarchy, transcribed locally by Voxtype and matched against an editable grammar.",
@@ -13,7 +13,7 @@
   },
   "license": "MIT",
   "barWidget": {
-    "displayName": "Utter",
+    "displayName": "Desktop Voice Control",
     "description": "Voice commands: hold the key, say what you want, watch it happen. Shows what was heard and what ran.",
     "category": "Productivity",
     "aliases": [

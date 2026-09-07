@@ -3,7 +3,7 @@
 
 Run: python3 tests/test_grammar.py
 
-The matcher is the only part of Utter that decides whether something runs, so
+The matcher is the only part that decides whether something runs, so
 this is where the safety guarantees are pinned down: no false positives on
 ordinary speech, no argument injection through slots, and destructive commands
 gated behind a confirm.
@@ -312,7 +312,7 @@ check("app that is not running is not found",
 check("no windows at all is not a crash", utter.find_window(GHOSTTY, []) is None)
 
 # The launcher binary must never be used as a window pattern: Teams' Exec is
-# `omarchy-launch-webapp …`, and matching on that found nothing, so Utter
+# `omarchy-launch-webapp …`, and matching on that found nothing, so the plugin
 # reported "Focus Teams" and started a second copy instead.
 check("launcher binaries are not window patterns",
       "omarchy-launch-webapp" in utter.GENERIC_BINARIES)
@@ -419,7 +419,7 @@ check("a fresh grammar is the shipped version",
       fresh.get("version") == GRAMMAR["version"], str(fresh.get("version")))
 
 # An untouched file from an older version is ours to upgrade. Build it the
-# way an older Utter would have: the old content, plus a marker recording
+# way an older version would have: the old content, plus a marker recording
 # that same content, so the fingerprint still matches.
 old = {k: v for k, v in fresh.items() if k != um.SHIPPED_MARKER}
 old["version"] = fresh["version"] - 1

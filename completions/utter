@@ -1,4 +1,5 @@
 # bash completion for utter
+# managed by io.github.rr-codebase.utter - installed by install.sh, removed by install.sh --uninstall
 _utter() {
   local cur prev words cword
   _init_completion 2>/dev/null || {

@@ -1,6 +1,6 @@
--- Utter keybindings.
+-- Desktop Voice Control keybindings.
 --
--- F9 dictates words (Voxtype). F10 gives commands (Utter). Hold the key while
+-- F9 dictates words (Voxtype). F10 gives commands (Desktop Voice Control). Hold the key while
 -- you speak, release to act. The pairing is deliberate: same hand, same
 -- gesture, different verb.
 --

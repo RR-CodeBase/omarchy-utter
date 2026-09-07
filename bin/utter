@@ -22,6 +22,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -31,10 +32,26 @@ HOME = Path.home()
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "omarchy" / "utter"
 STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "omarchy"
-RUNTIME_DIR = Path(
-    os.environ.get("UTTER_RUNTIME_DIR")
-    or (Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "utter")
-)
+def _runtime_dir() -> Path:
+    """Where the recording, the pid file and the pending prompt live.
+
+    Every name in here is predictable, so their privacy rests entirely on the
+    directory being private. XDG_RUNTIME_DIR already is - logind makes it 0700
+    and per-user - but /tmp is shared, and a fixed `/tmp/utter` is a name any
+    other account on the machine can create first and point wherever it likes.
+    The fallback therefore carries the uid, and ensure_runtime_dir() checks
+    whatever it finds before anything is written into it.
+    """
+    override = os.environ.get("UTTER_RUNTIME_DIR")
+    if override:
+        return Path(override)
+    base = os.environ.get("XDG_RUNTIME_DIR")
+    if base:
+        return Path(base) / "utter"
+    return Path("/tmp") / f"utter-{os.getuid()}"
+
+
+RUNTIME_DIR = _runtime_dir()
 
 COMMANDS_FILE = CONFIG_DIR / "commands.json"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
@@ -89,11 +106,104 @@ def log(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
+def ensure_runtime_dir() -> Path:
+    """Create the runtime directory privately, or refuse to use it.
+
+    mkdir(0o700) on its own only covers the case where we win the race: if the
+    path is already there we inherit whatever it is, which on a shared /tmp
+    could be another user's directory, or a symlink aimed at a file of ours.
+    So an existing path is checked with lstat - a real directory, not a link,
+    ours, and closed to everyone else - and we stop rather than write into
+    something that fails any of those.
+    """
+    path = RUNTIME_DIR
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError:
+            pass
+        st = os.lstat(path)
+    except OSError as exc:
+        raise RuntimeError(f"cannot use {path}: {exc}") from exc
+    if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+        raise RuntimeError(f"{path} is not a directory - refusing to use it")
+    if st.st_uid != os.getuid():
+        raise RuntimeError(
+            f"{path} belongs to another user (uid {st.st_uid}) - refusing to use it"
+        )
+    if st.st_mode & 0o077:
+        try:
+            os.chmod(path, 0o700)
+        except OSError as exc:
+            raise RuntimeError(f"{path} is open to other users: {exc}") from exc
+    return path
+
+
+def open_private(path: Path, mode: str = "wb"):
+    """Create or truncate `path` as 0600, never following a symlink."""
+    if path.parent == RUNTIME_DIR:
+        ensure_runtime_dir()
+    fd = os.open(
+        path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600
+    )
+    return os.fdopen(fd, mode)
+
+
+def wipe(path: Path) -> None:
+    """Overwrite a file, then delete it.
+
+    Used on the recording. Deleting a WAV only unlinks it, and what it holds is
+    a few seconds of someone's microphone; overwriting first costs one write.
+    On a copy-on-write or wear-levelled filesystem this is not a guarantee -
+    nothing in userspace is - but it stops the audio sitting in the free list.
+    """
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return
+    if stat.S_ISREG(st.st_mode):
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_NOFOLLOW)
+        except OSError:
+            fd = -1
+        if fd >= 0:
+            try:
+                chunk = b"\0" * 65536
+                left = st.st_size
+                while left > 0:
+                    left -= os.write(fd, chunk[: min(len(chunk), left)])
+                os.fsync(fd)
+            except OSError:
+                pass
+            finally:
+                os.close(fd)
+    try:
+        path.unlink()  # a symlink, or anything else that is not a file, goes too
+    except OSError:
+        pass
+
+
 def atomic_write(path: Path, text: str) -> None:
     """Never let a reader (the bar widget) see a half-written file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.parent == RUNTIME_DIR:
+        # Not a plain mkdir: this is the one directory whose mode matters, and
+        # `utter say` reaches pending.json without ever going through
+        # record_start(), so the check has to live here too.
+        ensure_runtime_dir()
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text)
+    # The temporary file is created no-follow and 0600 so a planted symlink at
+    # the .tmp name cannot redirect the write. os.replace() does not follow a
+    # symlink at the destination either, so it is replaced rather than written
+    # through.
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
+    with open_private(tmp, "w") as fh:
+        fh.write(text)
     os.replace(tmp, path)
 
 
@@ -139,7 +249,7 @@ def save_settings(s: dict) -> None:
 
 
 def grammar_fingerprint(data: dict) -> str:
-    """A hash of the grammar as Utter would write it, ignoring the marker it
+    """A hash of the grammar as we would write it, ignoring the marker it
     adds. Comparing this against the file later says whether anyone edited it."""
     stripped = {k: v for k, v in data.items() if k != SHIPPED_MARKER}
     rendered = json.dumps(stripped, indent=2, sort_keys=True) + "\n"
@@ -175,7 +285,7 @@ def migrate_grammar() -> str | None:
     one drove Hyprland with `hyprctl dispatch workspace 3`, which this
     Hyprland rejects, so its commands matched, reported success and did
     nothing. Replacing it is the right fix -- but only for a file nobody has
-    touched. Utter records which shipped grammar it installed; if the file
+    touched. We record which shipped grammar was installed; if the file
     still matches that, it is ours to replace. If it does not, the new one is
     written alongside as `commands.new.json` and left for the owner to merge.
     """
@@ -214,7 +324,7 @@ def migrate_grammar() -> str | None:
 
 
 def _matches_shipped(current: dict) -> bool:
-    """Is this file still exactly what Utter installed?"""
+    """Is this file still exactly what we installed?"""
     recorded = current.get(SHIPPED_MARKER)
     return bool(recorded) and grammar_fingerprint(current) == recorded
 
@@ -893,32 +1003,92 @@ def transcribe(wav: Path) -> str:
 
 # ---------------------------------------------------------------- recording
 
-def recording_pid() -> int | None:
+def _proc_ident(pid: int) -> tuple[str, str] | None:
+    """(start time, command name) for a live pid, or None if it is not there.
+
+    Field 22 of /proc/<pid>/stat is the process start time in clock ticks since
+    boot. Paired with the pid it identifies a process for the life of the
+    machine, which is what makes it safe to signal later: a pid on its own gets
+    recycled, so between our writing it down and our reading it back it can
+    belong to something else entirely.
+    """
     try:
-        pid = int(PID_FILE.read_text().strip())
-    except Exception:
-        return None
-    try:
-        os.kill(pid, 0)
-        return pid
+        raw = Path(f"/proc/{pid}/stat").read_text()
     except OSError:
-        try:
-            PID_FILE.unlink()
-        except OSError:
-            pass
         return None
+    try:
+        # comm is parenthesised and may itself contain spaces or a ')'.
+        close = raw.rindex(")")
+        comm = raw[raw.index("(") + 1:close]
+        fields = raw[close + 2:].split()  # fields[0] is state, field 3 overall
+        return fields[19], comm
+    except (ValueError, IndexError):
+        return None
+
+
+def clear_pid() -> None:
+    try:
+        PID_FILE.unlink()
+    except OSError:
+        pass
+
+
+def write_pid(pid: int) -> None:
+    ident = _proc_ident(pid)
+    atomic_write(PID_FILE, json.dumps({
+        "pid": pid,
+        "startTime": ident[0] if ident else "",
+        "comm": ident[1] if ident else "",
+    }))
+
+
+def recording_pid() -> int | None:
+    """The recorder we started and can still signal, or None.
+
+    All of this exists to make sure record_stop() never signals a process that
+    is not ours. A bare integer read back out of a file is not safe to hand to
+    os.kill: 0 means the whole process group, -1 means every process this user
+    may signal, 1 is init, and an honest pid can have been reused since. So the
+    file carries the start time too, and a pid only counts if the process
+    wearing it now is the same one we recorded.
+    """
+    data = load_json(PID_FILE, None)
+    if not isinstance(data, dict):
+        # Either nothing, or the bare integer written by 0.1.0. Neither can be
+        # verified, so drop it; `timeout -s INT` still caps any recording that
+        # was genuinely running across the upgrade.
+        clear_pid()
+        return None
+    try:
+        pid = int(data.get("pid"))
+    except (TypeError, ValueError):
+        clear_pid()
+        return None
+    if pid <= 1:
+        clear_pid()
+        return None
+    ident = _proc_ident(pid)
+    if ident is None:
+        clear_pid()
+        return None
+    recorded = data.get("startTime")
+    if recorded and ident[0] != recorded:
+        clear_pid()
+        return None
+    return pid
 
 
 def record_start(max_seconds: int) -> bool:
-    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_runtime_dir()
     if recording_pid():
         return False
     if not shutil.which("pw-record"):
         raise RuntimeError("pw-record not found - install pipewire-audio")
-    try:
-        WAV_FILE.unlink()
-    except OSError:
-        pass
+    wipe(WAV_FILE)
+    # Create the recording ourselves, 0600, before handing the name to
+    # pw-record: left to itself it would create the file with the default
+    # umask, and this is a few seconds of someone's microphone.
+    open_private(WAV_FILE, "wb").close()
     args = ["pw-record", "--rate", "16000", "--channels", "1", "--format", "s16"]
     # An explicit capture device, for machines where the default source is the
     # wrong one. `pactl list sources short` lists the names.
@@ -928,12 +1098,12 @@ def record_start(max_seconds: int) -> bool:
     args.append(str(WAV_FILE))
     if shutil.which("timeout"):
         args = ["timeout", "-s", "INT", str(max_seconds)] + args
-    log = open(RECORD_LOG, "wb")
+    log = open_private(RECORD_LOG, "wb")
     proc = subprocess.Popen(
         args, stdout=subprocess.DEVNULL, stderr=log, start_new_session=True,
     )
     log.close()
-    PID_FILE.write_text(str(proc.pid))
+    write_pid(proc.pid)
     # Only meaningful when start and stop happen in one process (selftest,
     # tests). In the keybinding flow `ptt start` exits and init reaps it.
     globals()["_RECORDER"] = proc
@@ -976,10 +1146,7 @@ def record_stop(timeout: float = 3.0) -> Path | None:
             except OSError:
                 break
             time.sleep(0.05)
-    try:
-        PID_FILE.unlink()
-    except OSError:
-        pass
+    clear_pid()
     return WAV_FILE if WAV_FILE.exists() else None
 
 
@@ -1037,7 +1204,7 @@ def execute(match: Match, dry: bool = False) -> tuple[bool, str]:
     # editor), so only a fast non-zero exit counts as a failure.
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        errlog = open(EXEC_LOG, "w+b")
+        errlog = open_private(EXEC_LOG, "w+b")
     except OSError:
         errlog = subprocess.DEVNULL
     try:
@@ -1176,7 +1343,7 @@ INTERNAL_HANDLERS.update({"launch": _handle_launch, "commands": _handle_commands
 def cmd_ptt_start(args) -> int:
     s = settings()
     if not s.get("enabled", True):
-        osd("Utter is off", "microphone")
+        osd("Desktop Voice Control is off", "microphone")
         return 1
     try:
         started = record_start(int(s.get("maxSeconds", 8)))
@@ -1209,6 +1376,11 @@ def cmd_ptt_stop(args) -> int:
         set_state(state="error", error=str(exc))
         osd(str(exc), "microphone")
         return 3
+    finally:
+        # The transcript is all that is needed; the audio has done its job. Kept
+        # around it would just be the last thing you said, sitting on disk
+        # until the next recording happens to overwrite it.
+        wipe(wav)
     if not text.strip():
         set_state(state="unheard", heard="", action="")
         osd("Didn't catch that", "microphone")
@@ -1437,7 +1609,10 @@ def cmd_selftest(args) -> int:
         print("no audio captured", file=sys.stderr)
         return 1
     print(f"captured {wav.stat().st_size} bytes", file=sys.stderr)
-    text = transcribe(wav)
+    try:
+        text = transcribe(wav)
+    finally:
+        wipe(wav)
     print(f"heard: {text!r}", file=sys.stderr)
     return interpret(text, dry=args.dry_run)
 

@@ -538,7 +538,7 @@
     },
     {
       "id": "utter.commands",
-      "group": "Utter",
+      "group": "Voice",
       "say": [
         "what can i say",
         "list commands",

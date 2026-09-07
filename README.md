@@ -1,8 +1,8 @@
-# Utter
+# Desktop Voice Control
 
 **Say it, and the window manager does it.**
 
-Omarchy already turns your voice into text. Utter turns it into *actions*. Hold
+Omarchy already turns your voice into text. Desktop Voice Control turns it into *actions*. Hold
 `F10`, say "focus left", "workspace three", "throw this to two", "lock the
 screen" — and it happens.
 
@@ -14,7 +14,7 @@ let go.
 
 ## Why it isn't dictation
 
-Dictation types what you said into the focused window. Utter never types
+Dictation types what you said into the focused window. Desktop Voice Control never types
 anything. An utterance either matches a command in the grammar and runs it, or
 it is thrown away. That is the whole safety model, and it means a misheard
 sentence can't end up in your code.
@@ -136,7 +136,7 @@ comes out ("one password" finds 1Password, "x journal" finds Xournal++). If
 nothing matches well enough you get *"no app called …"* rather than the nearest
 alphabetical guess, because opening the wrong app is worse than opening none.
 
-If the app already has a window open, Utter focuses it rather than starting a
+If the app already has a window open, Desktop Voice Control focuses it rather than starting a
 second copy, and says which it did — *"Focus Teams"* against *"Open Teams"*.
 The window is found by address from `hyprctl clients`, matched on the app's
 declared window class, its binary and its name, because handing a pattern to a
@@ -175,10 +175,10 @@ After editing, `utter doctor` re-checks the whole file.
 
 ### When the shipped grammar changes
 
-The grammar carries a `version`, and Utter records the fingerprint of the file
+The grammar carries a `version`, and Desktop Voice Control records the fingerprint of the file
 it installed. When a newer grammar ships:
 
-- if your file is still exactly what Utter wrote, it is replaced and the old
+- if your file is still exactly what it wrote, it is replaced and the old
   one kept beside it as `commands.v<n>.json`;
 - **if you have edited it, it is left alone.** The new grammar is written
   beside it as `commands.new.json` and `utter doctor` tells you it is there.
