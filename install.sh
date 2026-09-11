@@ -211,11 +211,21 @@ if [[ -f $SCRIPT_DIR/completions/utter ]]; then
     warn "$(tilde "$COMPLETION") already exists and is not ours - left alone"
   else
     mkdir -p "$(dirname "$COMPLETION")"
-    # Staged and renamed rather than written in place: writing through whatever
-    # happens to be sitting at the destination is the thing being avoided.
-    install -m 0644 "$SCRIPT_DIR/completions/utter" "$COMPLETION.new"
-    mv -f "$COMPLETION.new" "$COMPLETION"
-    ok "shell completion installed"
+    # Written to a fresh temporary file and renamed into place, so whatever is
+    # at the destination is replaced rather than written through. The temporary
+    # name is random and created exclusively: a predictable `$COMPLETION.new`
+    # could be pre-created by anyone who can write to that directory - as a
+    # symlink, to redirect the write, or as a FIFO, to block it. mktemp makes a
+    # new regular file at 0600 or fails outright.
+    if tmp=$(mktemp "${COMPLETION%/*}/.utter-completion.XXXXXXXX" 2>/dev/null) \
+       && cat "$SCRIPT_DIR/completions/utter" > "$tmp" \
+       && chmod 0644 "$tmp" \
+       && mv -f "$tmp" "$COMPLETION"; then
+      ok "shell completion installed"
+    else
+      [[ -n ${tmp:-} ]] && rm -f "$tmp"
+      warn "could not install the shell completion"
+    fi
   fi
 fi
 

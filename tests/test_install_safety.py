@@ -136,8 +136,11 @@ check("install.sh guards the symlink it creates",
       '! link_is_ours "$BIN_LINK"' in SH)
 check("install.sh guards the completion it installs",
       '! file_is_ours "$COMPLETION"' in SH)
-check("install.sh stages the completion rather than writing through the target",
-      '"$COMPLETION.new"' in SH and 'mv -f "$COMPLETION.new" "$COMPLETION"' in SH)
+check("install.sh stages the completion in an exclusive temporary file",
+      'mktemp "${COMPLETION%/*}/' in SH and 'mv -f "$tmp" "$COMPLETION"' in SH)
+check("install.sh no longer uses a predictable staging name",
+      'install -m 0644 "$SCRIPT_DIR/completions/' not in SH,
+      "a fixed $COMPLETION.new can be pre-created as a symlink or a FIFO")
 check("uninstall proves ownership before removing the symlink",
       re.search(r'if link_is_ours "\$BIN_LINK"; then\s+rm -f', SH) is not None)
 check("uninstall proves ownership before removing the completion",
